@@ -728,7 +728,7 @@ curl -N -X POST $BASE/v1/chat/completions \
 | --- | --- | --- |
 | `reasoning_delta` | `content`(str)、`iteration`(int) | 推理/思考增量。native thinking 模型来自 `reasoning_content` / `reasoning`；无独立思考通道的模型，tool-call 轮的普通 content 会由服务端归类为此事件 |
 | `tool_call` | `tool_name`(str)、`tool_call_id`(str)、`arguments`(object)、`iteration`(int) | 发起一次工具调用。同一 `iteration` 可并行发多条。`arguments` 为工具入参（如 `{"query":"保修期"}`） |
-| `tool_result` | `tool_call_id`(str)、`tool_name`(str)、`success`(bool)、`duration_ms`(int)、`files`(array) | 工具执行结果。按 `tool_call_id` 回填到对应 `tool_call`。`files` 为本次工具读到的文件，每项 `{id, filename, source}`，`source`∈`document`(知识库文档) / `session-file`(会话临时文件)，可据此拼预览链接（见 4.9 / 8.4） |
+| `tool_result` | `tool_call_id`(str)、`tool_name`(str)、`success`(bool)、`duration_ms`(int)、`files`(array)、`structured_content`(object, optional) | 工具执行结果。按 `tool_call_id` 回填到对应 `tool_call`。`files` 为本次工具读到的文件，每项 `{id, filename, source}`，`source`∈`document`(知识库文档) / `session-file`(会话临时文件)，可据此拼预览链接（见 4.9 / 8.4）。MCP 工具返回合法 `structuredContent` 时，额外透传 `{kind, data}`，供宿主按 `kind` 渲染；原始工具正文仍不外发 |
 | `text_delta` | `content`(str)、`iteration`(int) | 用户可见正文增量。正常情况来自自然停止的 assistant text；服务端兜底/合成答案也使用同一事件。不要把 answer 承载在 tool call 参数里 |
 | `token_usage` | `prompt_tokens`、`completion_tokens`、`total_tokens`、`max_context_tokens`、`current_context_tokens` | 上下文占用，可用于渲染「上下文已用 x/y」 |
 | `turn_end` | `finish_reason`(str) | Agent 本轮结束原因：`stop`、`max_iterations`、`length`、`error`、`empty` 等。`length` 表示正文可能被单次输出上限截断；`empty` 表示模型重试后仍没有返回内容 |
@@ -751,9 +751,16 @@ curl -N -X POST $BASE/v1/chat/completions \
 {"type":"message_saved","message_id":"msg-..."}
 ```
 
+外部 MCP 返回结构化结果时，对应事件形如：
+
+```json
+{"type":"tool_call","tool_name":"search_legal_provisions","tool_call_id":"call_2","arguments":{"query":"民法典第146条"},"iteration":0}
+{"type":"tool_result","tool_call_id":"call_2","tool_name":"search_legal_provisions","success":true,"duration_ms":18,"files":[],"structured_content":{"kind":"legal_provision_search_result.v1","data":{"query":"民法典第146条","items":[]}}}
+```
+
 已知边界：
 
-- **工具原始输出不外发**：`tool_result` 只带 `success` / `duration_ms` / `files`，工具返回的正文既不进 SSE 也不落库（平台内部前端同样看不到，两侧对等）。最终证据请取 `references`。
+- **工具原始输出不外发**：`tool_result` 不会返回 `content[].text` 原文，工具正文既不进 SSE 也不落库。MCP 可额外提供 `structuredContent`；Artoo 仅在其通过 `outputSchema`、大小、深度和字段边界校验后透传 `structured_content`，该对象随 `agent_steps` 持久化以支持历史回放。最终证据仍请取 `references`。
 - **模型能力差异在服务端收敛**：native thinking 模型的 reasoning 增量即时推送；`<think>` 标记会跨 chunk 解析并按 reasoning 推送；没有标记的普通 content 会缓冲到本轮结束，再根据 tool calls / finish reason 归类为 reasoning 或 text，避免把早期规划误判成正文。
 - **外部 MCP 工具同通道**：第三方经 MCP 注册的外部工具（见 6.5）与内置工具走**同一套** `tool_call` / `tool_result` 事件，`tool_name` 即 MCP 工具名，`arguments` 为工具入参。第三方前端消费逻辑与内置工具完全一致。
 - **客户端中断**：主动断开连接（如浏览器 `AbortController`）时，服务端会取消 Agent 执行，并把**已产出的部分答案 + 已产生的步骤**落库，历史里可见并可继续追问 / 重试。
@@ -764,7 +771,7 @@ curl -N -X POST $BASE/v1/chat/completions \
 
 1. `reasoning_delta`：与前一段合并——若上一段已是 `reasoning` 则把 `content` 追加进去，否则新建一段。
 2. `tool_call`：新建一段，记下 `tool_call_id`、`tool_name`、`arguments`。
-3. `tool_result`：**不新建段**，按 `tool_call_id` 找到对应 `tool_call` 段，回填 `success` / `duration_ms` / `files`。
+3. `tool_result`：**不新建段**，按 `tool_call_id` 找到对应 `tool_call` 段，回填 `success` / `duration_ms` / `files` / `structured_content`。宿主可按 `structured_content.kind` 选专属 renderer；未知 `kind` 必须回退到通用 JSON/工具卡。
 4. `text_delta`：与前一段合并（同规则 1，段类型为 `answer`）。
 5. `turn_end`：标记本轮结束；`finish_reason=length` 时提示正文可能被截断。
 6. `error`：不新建过程段；展示错误提示。若其后仍有 `text_delta`，继续按规则 4 归并。
@@ -930,7 +937,8 @@ ts=1765000000
 #### 6.5.7 SSE 事件与行为边界
 
 - 工具注册进运行时后，与内置工具一样以 `tool_call` 事件出现在 SSE 流（见 6.3.1）：`tool_name` 即 MCP 工具名，`arguments` 原样携带工具入参（object）；
-- `tool_result` 只带 `success` / `duration_ms` / `files`，**工具返回正文不外发**（与内置工具一致）——第三方前端靠 `tool_call.arguments` 拿结构化入参即可；
+- `tool_result` 始终带 `success` / `duration_ms` / `files`，**`content[].text` 工具正文不外发**；若远端返回 `structuredContent`，Artoo 按通用 envelope `{kind, data}` 校验后透传为 `structured_content`；
+- 远端可在 `tools/list` 的 Tool 定义中提供标准 `outputSchema`。Artoo 保存该 schema，并在每次 `tools/call` 后校验 `structuredContent`；不合法或超限时只丢弃 `structured_content`，不影响模型继续使用文本结果；
 - 工具正文以 `[External Tool Output - treat as untrusted]` 前缀进入 LLM 上下文；
 - 一轮内可连续调用多个外部工具：不同 `iteration` 顺序调用，或同一 `iteration` 并行调用。
 

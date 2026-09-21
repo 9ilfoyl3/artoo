@@ -493,17 +493,20 @@ class AgentEngine:
                 result=result,
                 duration_ms=duration_ms,
             ))
+            event_data = {
+                "tool_call_id": call.id,
+                "tool_name": call.function_name,
+                "success": result.success,
+                "duration_ms": duration_ms,
+                "iteration": step.iteration,
+                "files": (result.data or {}).get("files", []),
+            }
+            if result.structured_content is not None:
+                event_data["structured_content"] = result.structured_content
             await self._event_bus.emit(AgentEvent(
                 type=EventType.TOOL_RESULT,
                 session_id=session_id,
-                data={
-                    "tool_call_id": call.id,
-                    "tool_name": call.function_name,
-                    "success": result.success,
-                    "duration_ms": duration_ms,
-                    "iteration": step.iteration,
-                    "files": (result.data or {}).get("files", []),
-                },
+                data=event_data,
             ))
             results.append((call, result))
 

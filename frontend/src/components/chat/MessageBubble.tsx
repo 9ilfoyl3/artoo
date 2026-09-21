@@ -8,7 +8,10 @@ import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '@/components/ui/tooltip'
 import { isImageFilename } from '@/components/chat/SessionFileList'
+import { StructuredResultCard } from '@/components/chat/StructuredResultCard'
+import { summarizeStructuredResult } from '@/components/chat/structuredResultRegistry'
 import type { MessageAttachment, SessionFileResponse } from '@/lib/api'
+import type { StructuredToolContent } from '@/lib/structuredResult'
 import { useArtifactStore, isPreviewable, type ArtifactTarget } from '@/stores/artifactStore'
 
 // 从文件名提取小写扩展名（无点），用于判断是否可预览
@@ -49,6 +52,8 @@ export interface ContentSegment {
   durationMs?: number
   // 本次工具读到的文件（检索类工具解析 doc_id→文件名/来源），用于步骤行内联可点击预览
   files?: ToolFile[]
+  // MCP structuredContent 经后端通用校验后的宿主渲染数据；原始工具文本不在此通道。
+  structuredContent?: StructuredToolContent
 }
 
 // 消息类型
@@ -579,6 +584,10 @@ function StepRow({
   const isSkill = isTool && seg.toolName === 'read_skill'
   const toolLabel = (seg.toolName && TOOL_LABELS[seg.toolName]) || seg.toolName || seg.content || ''
   const argSummary = toolArgSummary(seg.toolName, seg.toolArgs)
+  const structuredSummary = seg.structuredContent
+    ? summarizeStructuredResult(seg.structuredContent)
+    : null
+  const headerSummary = structuredSummary || argSummary
 
   // read_attachment 步骤：尝试按文件名解析本会话已上传文件，命中可预览类型则可点击预览。
   const attachmentTarget: ArtifactTarget | null = (() => {
@@ -656,8 +665,15 @@ function StepRow({
             ) : readFiles.length > 0 ? (
               <InlineToolFiles files={readFiles} fileTarget={fileTarget} onOpen={openArtifact} />
             ) : (
-              argSummary && (
-                <span className="min-w-0 truncate font-mono text-primary/80">{argSummary}</span>
+              headerSummary && (
+                <span
+                  className={cn(
+                    'min-w-0 truncate',
+                    structuredSummary ? 'text-muted-foreground/80' : 'font-mono text-primary/80'
+                  )}
+                >
+                  {headerSummary}
+                </span>
               )
             )}
             <ToolResultStatus success={seg.success} durationMs={seg.durationMs} />
@@ -705,9 +721,16 @@ function StepRow({
                   ) : readFiles.length > 0 ? (
                     <>读到 {readFiles.length} 个文件：</>
                   ) : (
-                    <>已调用 <span className="font-mono">{argSummary || toolLabel}</span></>
+                    <>已调用 <span className="font-mono">{headerSummary || toolLabel}</span></>
                   )}
                 </p>
+                {seg.structuredContent && (
+                  <StructuredResultCard
+                    content={seg.structuredContent}
+                    toolName={seg.toolName || ''}
+                    success={seg.success}
+                  />
+                )}
                 {readFiles.length > 0 && (
                   <div className="flex flex-col gap-1">
                     {readFiles.map((f, fi) => {

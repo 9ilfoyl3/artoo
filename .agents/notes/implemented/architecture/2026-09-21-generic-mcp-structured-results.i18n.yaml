@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record: the Git blob hash of each side as of the
+# last confirmed-consistent state. Both languages carry equal authority; after
+# editing either side, bring the other along and re-record both hashes with:
+#   git hash-object .agents/notes/implemented/architecture/2026-09-21-generic-mcp-structured-results.md .agents/notes/implemented/architecture/2026-09-21-generic-mcp-structured-results.zh.md
+2026-09-21-generic-mcp-structured-results.md: b61a01599f072bb93424135c860730953b9510a6
+2026-09-21-generic-mcp-structured-results.zh.md: 07bf49191ee2f23be01b57d08dfdaedca00e2977

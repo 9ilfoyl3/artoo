@@ -105,6 +105,7 @@ class ToolRegistry:
                 output=truncate_tool_output(result.output, self._max_tool_output_chars),
                 data=result.data,
                 error=result.error,
+                structured_content=result.structured_content,
             )
 
         # 失败时追加 error hint 引导 LLM 换策略
@@ -114,6 +115,7 @@ class ToolRegistry:
                 output=result.output,
                 data=result.data,
                 error=result.error + _TOOL_ERROR_HINT,
+                structured_content=result.structured_content,
             )
 
         return result

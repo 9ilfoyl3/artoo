@@ -1,6 +1,7 @@
 // API 客户端：统一请求封装
 
 import { authHeaders, handleUnauthorized } from './auth'
+import type { StructuredToolContent } from './structuredResult'
 
 const BASE_URL = '/api'
 
@@ -881,6 +882,7 @@ export interface SessionMessageItem {
     arguments?: Record<string, unknown>
     success: any
     duration_ms: number | undefined
+    structured_content?: StructuredToolContent
     step: string
     detail: string
     max_context_tokens?: number

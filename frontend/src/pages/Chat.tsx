@@ -19,6 +19,7 @@ import { useConfirm } from '@/lib/confirm-context'
 import { authHeaders, handleUnauthorized } from '@/lib/auth'
 import { useArtifactStore } from '@/stores/artifactStore'
 import { cn } from '@/lib/utils'
+import { isStructuredToolContent } from '@/lib/structuredResult'
 
 function browserTimezone(): string | undefined {
   try {
@@ -458,6 +459,10 @@ function Chat() {
                     existing.success = step.success as boolean
                     existing.durationMs = step.duration_ms as number | undefined
                     existing.files = ((step as Record<string, unknown>).files as ContentSegment['files']) || undefined
+                    const structuredContent = (step as Record<string, unknown>).structured_content
+                    existing.structuredContent = isStructuredToolContent(structuredContent)
+                      ? structuredContent
+                      : undefined
                   }
                 } else if (step.type === 'text_delta' || step.type === 'final_answer') {
                   if (step.content) {
@@ -798,6 +803,9 @@ function Chat() {
                             success: parsed.success,
                             durationMs: parsed.duration_ms,
                             files: parsed.files,
+                            structuredContent: isStructuredToolContent(parsed.structured_content)
+                              ? parsed.structured_content
+                              : undefined,
                           }
                         : seg
                     )
