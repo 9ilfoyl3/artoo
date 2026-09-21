@@ -148,6 +148,15 @@ function AgentConfig() {
     onError: (e) => toast.error(e instanceof Error ? e.message : '操作失败'),
   })
 
+  const setDefaultMutation = useMutation({
+    mutationFn: (id: string) => agentPresetApi.setDefault(id),
+    onSuccess: (_preset, _id) => {
+      queryClient.invalidateQueries({ queryKey: ['agent-presets'] })
+      toast.success('已设为全局默认智能体')
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : '设置默认智能体失败'),
+  })
+
   // 删除预设（统一确认交互）
   async function handleDelete(preset: AgentPresetItem) {
     const ok = await confirm({
@@ -305,11 +314,26 @@ function AgentConfig() {
               key={preset.id}
               className="group relative flex flex-col rounded-xl border border-border bg-card p-5 transition-all duration-200 hover:shadow-lg hover:border-primary/20 hover:-translate-y-0.5"
             >
-              {preset.is_default && (
-                <div className="absolute top-4 right-4">
+              {preset.is_default ? (
+                <div className="absolute top-4 right-4" title="全局默认智能体">
                   <Star className="h-4 w-4 text-yellow-500 fill-yellow-500" />
                 </div>
-              )}
+              ) : isSuperAdmin ? (
+                <button
+                  type="button"
+                  onClick={() => setDefaultMutation.mutate(preset.id)}
+                  disabled={setDefaultMutation.isPending}
+                  className="absolute top-3 right-3 flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground/45 transition-colors hover:bg-yellow-500/10 hover:text-yellow-600 disabled:cursor-not-allowed disabled:opacity-50 cursor-pointer"
+                  title="设为全局默认智能体"
+                  aria-label={`将${preset.name}设为全局默认智能体`}
+                >
+                  {setDefaultMutation.isPending && setDefaultMutation.variables === preset.id ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Star className="h-4 w-4" />
+                  )}
+                </button>
+              ) : null}
               <div className="w-10 h-10 rounded-lg bg-primary/8 flex items-center justify-center mb-3">
                 <Bot className="h-5 w-5 text-primary" />
               </div>
