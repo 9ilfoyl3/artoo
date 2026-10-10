@@ -19,6 +19,16 @@ _MIN_IMAGE_SIZE = 50
 _MIN_IMAGE_BYTES = 1024
 # 单文档最大提取图片数量
 _MAX_IMAGES_PER_DOC = 50
+# 判定文本层可信所需的最小字符数：过短文本多为标题、页眉或装饰文字
+_MIN_TEXT_LAYER_CHARS = 80
+# 判定文本层可信所需的最小文本面积占比：避免把整页照片的短说明误判为扫描文本层
+_MIN_TEXT_LAYER_AREA_RATIO = 0.01
+# 判定文本层可信所需的最小纵向跨度：单行说明不视为整页扫描文本层
+_MIN_TEXT_LAYER_HEIGHT_RATIO = 0.03
+# 扫描底图占页面面积比例阈值
+_PAGE_BACKGROUND_IMAGE_AREA_RATIO = 0.70
+# 扫描底图中的文本块按字符计需占页面文本层的比例
+_PAGE_BACKGROUND_TEXT_OVERLAP_RATIO = 0.60
 
 
 class PdfLoader(BaseLoader):
@@ -66,6 +76,7 @@ class PdfLoader(BaseLoader):
             # 使用 get_text("dict") 获取带 bbox 的文本块，供 TextCleaner 去噪使用
             blocks = self._extract_page_blocks(page)
             page_blocks.append(blocks)
+            has_usable_text_layer = self._has_usable_text_layer(page, blocks)
 
             # 达到图片上限后不再提取
             if total_images_extracted >= _MAX_IMAGES_PER_DOC:
@@ -73,7 +84,13 @@ class PdfLoader(BaseLoader):
 
             # 提取该页嵌入的图片
             page_images = self._extract_page_images(
-                doc, page, page_idx + 1, tmp_dir, seen_hashes
+                doc,
+                page,
+                page_idx + 1,
+                tmp_dir,
+                seen_hashes,
+                page_blocks=blocks,
+                has_usable_text_layer=has_usable_text_layer,
             )
             total_images_extracted += len(page_images)
             images.extend(page_images)
@@ -141,12 +158,98 @@ class PdfLoader(BaseLoader):
         return result
 
     @staticmethod
+    def _has_usable_text_layer(page: fitz.Page, blocks: list[dict]) -> bool:
+        """判断页面文本层是否足以作为整页扫描图的权威文本来源。
+
+        扫描件常见“整页图像 + 隐藏 OCR 文本层”结构。只要文本层达到最小字符数
+        且覆盖一定页面面积，就将其视为该页的文本来源，避免后面再把整页图像 OCR
+        一次并追加成重复内容。
+        """
+        text_chars = sum(len(block.get("text", "").strip()) for block in blocks)
+        if text_chars < _MIN_TEXT_LAYER_CHARS:
+            return False
+
+        page_area = page.rect.width * page.rect.height
+        if page_area <= 0:
+            return False
+
+        text_area = sum(
+            max(0.0, block["bbox"][2] - block["bbox"][0])
+            * max(0.0, block["bbox"][3] - block["bbox"][1])
+            for block in blocks
+        )
+        if text_area / page_area < _MIN_TEXT_LAYER_AREA_RATIO:
+            return False
+
+        text_top = min(block["bbox"][1] for block in blocks)
+        text_bottom = max(block["bbox"][3] for block in blocks)
+        text_height_ratio = (text_bottom - text_top) / page.rect.height
+        return text_height_ratio >= _MIN_TEXT_LAYER_HEIGHT_RATIO
+
+    @staticmethod
+    def _is_page_background_image(
+        page: fitz.Page,
+        blocks: list[dict],
+        xref: int,
+    ) -> bool:
+        """判断图片是否是该页整页扫描底图。
+
+        需要同时满足：
+        - 图片显示区域覆盖页面大部分面积；
+        - 页面文本层的大部分字符位于该图片区域内。
+
+        普通插图、图表和局部截图不会命中，因此仍会进入后续 OCR。
+        """
+        try:
+            image_rects = page.get_image_rects(xref)
+        except Exception:
+            return False
+        if not image_rects:
+            return False
+
+        page_area = page.rect.width * page.rect.height
+        if page_area <= 0:
+            return False
+
+        total_chars = sum(len(block.get("text", "").strip()) for block in blocks)
+        if total_chars <= 0:
+            return False
+
+        for image_rect in image_rects:
+            visible = image_rect & page.rect
+            visible_area = visible.width * visible.height
+            if visible_area / page_area < _PAGE_BACKGROUND_IMAGE_AREA_RATIO:
+                continue
+
+            inside_chars = 0
+            for block in blocks:
+                text = block.get("text", "").strip()
+                if not text:
+                    continue
+                block_rect = fitz.Rect(block["bbox"])
+                overlap = block_rect & image_rect
+                block_area = block_rect.width * block_rect.height
+                if (
+                    block_area > 0
+                    and overlap.width * overlap.height / block_area >= 0.5
+                ):
+                    inside_chars += len(text)
+
+            if inside_chars / total_chars >= _PAGE_BACKGROUND_TEXT_OVERLAP_RATIO:
+                return True
+
+        return False
+
+    @staticmethod
     def _extract_page_images(
         doc: fitz.Document,
         page: fitz.Page,
         page_num: int,
         tmp_dir: str,
         seen_hashes: set[str],
+        *,
+        page_blocks: list[dict],
+        has_usable_text_layer: bool,
     ) -> list[EmbeddedImage]:
         """提取单页中的嵌入图片，写入临时目录
 
@@ -158,6 +261,8 @@ class PdfLoader(BaseLoader):
             page_num: 页码（从1开始）
             tmp_dir: 临时目录路径
             seen_hashes: 已见图片 hash 集合（用于去重，会被修改）
+            page_blocks: 当前页文本块（含 bbox）
+            has_usable_text_layer: 当前页是否存在可信文本层
 
         Returns:
             该页提取到的 EmbeddedImage 列表
@@ -199,6 +304,10 @@ class PdfLoader(BaseLoader):
             with open(img_path, "wb") as f:
                 f.write(image_bytes)
 
+            is_page_background = (
+                has_usable_text_layer
+                and PdfLoader._is_page_background_image(page, page_blocks, xref)
+            )
             images.append(
                 EmbeddedImage(
                     file_path=img_path,
@@ -206,6 +315,7 @@ class PdfLoader(BaseLoader):
                     page_or_index=page_num,
                     content_hash=img_hash,
                     description=f"pdf_page{page_num}_img{len(images)+1}",
+                    is_page_background=is_page_background,
                 )
             )
 

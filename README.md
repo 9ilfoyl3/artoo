@@ -92,7 +92,7 @@ Artoo 以 ReAct Agent 为核心，让大模型自主编排关键词检索、语�
 | ReAct 推理 | 大模型在 Think → Act → Observe 循环中自主决策，调用工具、分析结果、决定停止时机 |
 | 工具调用 | 内置知识检索、关键词匹配、深度阅读、附件阅读、网页搜索、思考、技能加载，支持远程 MCP 工具 |
 | Evidence-First | Progressive RAG 提示词强制"先检索、深读 chunk、再作答"，引用溯源、拒绝臆造 |
-| Agent 预设 | 内置「快速问答」（hybrid 单轮）与「智能推理」（agent 多步），系统提示词可在线 AI 改写 |
+| Agent 预设 | 内置「快速问答」（hybrid 单轮）与「智能推理」（agent 多步），系统提示词可在线 AI 改写；超级管理员可将任一平台级预设设为全局默认 |
 | 会话附件 | 对话中上传文件即时入库为会话级检索源，Agent 通过 `read_attachment` 确定性整篇读取，不与正式知识库竞争排序 |
 | 上下文管理 | 三层递进式压缩（Token 估算 + Usage 追踪 + LLM 摘要 + 分组截断），长对话不超窗 |
 | 流式可视化 | 思考、工具调用、引用、Token 占用通过 SSE 实时推送，逐 token 渲染 |
@@ -267,9 +267,17 @@ make build-app              # 仅应用镜像的更新包（迭代更新，不�
 .\deploy\build.ps1 -AppOnly        # 仅应用镜像的更新包
 # 产物均在 dist/
 
+#    双架构交付（amd64 / arm64 各出独立目录，附首次部署与更新包）：
+deploy/build.sh --arch amd64 --out dist/artoo-deploy-amd64
+deploy/build.sh --arch arm64 --out dist/artoo-deploy-arm64
+deploy/build.sh --arch amd64 --out dist/artoo-update-amd64 --app-only
+deploy/build.sh --arch arm64 --out dist/artoo-update-arm64 --app-only
+
 # ② 把 dist/ 整体拷到（Linux）服务器，一键部署
 cd dist && ./install.sh     # 加载镜像 → 引导填 .env → 起中间件(infra) → 起应用(app)
 ```
+
+面向实施人员的交付手册见 `deploy/DELIVERY.md`（随包交付），区分首次部署完整包与部署更新包两种场景。
 
 `install.sh` 首次运行会从 `.env.example` 生成 `.env` 并提示填写必填项（`JWT_SECRET`、`SUPER_ADMIN_*`、`LLM_*`、`EMBED_BASE_URL`、`RERANK_BASE_URL`），填好后再次执行即可拉起全部服务。
 

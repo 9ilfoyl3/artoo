@@ -805,6 +805,10 @@ export interface AgentAvailableTools {
 export const agentPresetApi = {
   list: () => request<AgentPresetItem[]>('/agent-presets'),
   availableTools: () => request<AgentAvailableTools>('/agent-presets/available-tools'),
+  setDefault: (id: string) =>
+    request<AgentPresetItem>(`/agent-presets/${id}/default`, {
+      method: 'PUT',
+    }),
   rewritePrompt: (data: { instruction: string; current_prompt?: string }) =>
     request<{ prompt: string }>('/agent-presets/rewrite-prompt', {
       method: 'POST',
