@@ -74,7 +74,7 @@ for arg in "$@"; do
                      PURGE_ARGS+=("$arg") ;;
     --scope=*)       PURGE_ARGS+=("--scope" "${arg#*=}") ;;
     -h|--help)       sed -n '2,32p' "$0"; exit 0 ;;
-    *) echo "✗ 未知参数: $arg（用 --help 查看用法）" >&2; exit 1 ;;
+    *) echo "✗ 未知参数: ${arg}（用 --help 查看用法）" >&2; exit 1 ;;
   esac
 done
 
@@ -117,7 +117,7 @@ err()  { echo -e "\033[31m[reset]\033[0m $*" >&2; }
 log "使用 Compose 命令: $COMPOSE_CMD"
 
 if [ ! -f "$COMPOSE_FILE" ]; then
-  err "未找到 $COMPOSE_FILE，请在项目根目录（或 deploy/ 的上一级）执行本脚本。"
+  err "未找到 ${COMPOSE_FILE}，请在项目根目录（或 deploy/ 的上一级）执行本脚本。"
   exit 1
 fi
 

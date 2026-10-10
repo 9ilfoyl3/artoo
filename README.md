@@ -267,9 +267,17 @@ make build-app              # 仅应用镜像的更新包（迭代更新，不�
 .\deploy\build.ps1 -AppOnly        # 仅应用镜像的更新包
 # 产物均在 dist/
 
+#    双架构交付（amd64 / arm64 各出独立目录，附首次部署与更新包）：
+deploy/build.sh --arch amd64 --out dist/artoo-deploy-amd64
+deploy/build.sh --arch arm64 --out dist/artoo-deploy-arm64
+deploy/build.sh --arch amd64 --out dist/artoo-update-amd64 --app-only
+deploy/build.sh --arch arm64 --out dist/artoo-update-arm64 --app-only
+
 # ② 把 dist/ 整体拷到（Linux）服务器，一键部署
 cd dist && ./install.sh     # 加载镜像 → 引导填 .env → 起中间件(infra) → 起应用(app)
 ```
+
+面向实施人员的交付手册见 `deploy/DELIVERY.md`（随包交付），区分首次部署完整包与部署更新包两种场景。
 
 `install.sh` 首次运行会从 `.env.example` 生成 `.env` 并提示填写必填项（`JWT_SECRET`、`SUPER_ADMIN_*`、`LLM_*`、`EMBED_BASE_URL`、`RERANK_BASE_URL`），填好后再次执行即可拉起全部服务。
 

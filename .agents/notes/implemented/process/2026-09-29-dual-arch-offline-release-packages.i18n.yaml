@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record: the Git blob hash of each side as of the
+# last confirmed-consistent state. After editing either side, update the other
+# and re-record both hashes with:
+#   git hash-object .agents/notes/implemented/process/2026-09-29-dual-arch-offline-release-packages*.md
+2026-09-29-dual-arch-offline-release-packages.md: 4026b914d8070be406748d22ea9e356840c4fc96
+2026-09-29-dual-arch-offline-release-packages.zh.md: baf52a14c1f01283b75ec307c4a90c23a1656c8b
