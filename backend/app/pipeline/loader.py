@@ -12,6 +12,7 @@ class EmbeddedImage:
     page_or_index: int = 0       # 所在页码或位置索引（从1开始）
     content_hash: str = ""       # 图片内容 hash（用于去重）
     description: str = ""        # 可选描述
+    is_page_background: bool = False  # PDF 整页扫描底图；页面已有可信文本层时跳过其 OCR
 
 
 @dataclass

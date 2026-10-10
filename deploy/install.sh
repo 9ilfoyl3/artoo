@@ -72,20 +72,30 @@ resolve_infra_services() {
 }
 
 ensure_compose_compat() {
-  # 去掉 profiles 行（V1 不支持；V2 下按显式服务名启动也不需要）。
-  if grep -q "profiles:" "$COMPOSE_FILE" 2>/dev/null; then
-    sed -i '/profiles:/d' "$COMPOSE_FILE"
-  fi
-
-  # 处理网络：若外部网络已存在则标记 external，避免重复创建冲突。
   local NETWORK_NAME="arag-network"
+  # 统一用 awk 原地改写：GNU sed 与 BSD sed(macOS) 的 -i 与 \n 行为不同，awk 两端一致。
+  # 1) 去掉 profiles 行（V1 不支持；V2 下按显式服务名启动也不需要）。
+  # 2) 若 arag-network 已存在（复用外部网络）则标记 external，避免重复创建冲突；否则删除残留标记。
+  local tmp_file="${COMPOSE_FILE}.tmp"
   if docker network inspect "$NETWORK_NAME" >/dev/null 2>&1; then
-    if ! grep -q "external: true" "$COMPOSE_FILE"; then
-      sed -i "s/name: ${NETWORK_NAME}/name: ${NETWORK_NAME}\n    external: true/" "$COMPOSE_FILE"
+    if grep -q "external: true" "$COMPOSE_FILE"; then
+      awk '/^[[:space:]]*profiles:/ { next } { print }' "$COMPOSE_FILE" > "$tmp_file"
+    else
+      awk -v net="$NETWORK_NAME" '
+        /^[[:space:]]*profiles:/ { next }
+        $0 ~ "^[[:space:]]*name: " net "[[:space:]]*$" && !ext_added {
+          print
+          print "    external: true"
+          ext_added = 1
+          next
+        }
+        { print }
+      ' "$COMPOSE_FILE" > "$tmp_file"
     fi
   else
-    sed -i '/external: true/d' "$COMPOSE_FILE"
+    awk '/^[[:space:]]*profiles:/ { next } /external: true/ { next } { print }' "$COMPOSE_FILE" > "$tmp_file"
   fi
+  mv "$tmp_file" "$COMPOSE_FILE"
 }
 
 check_env() {
@@ -173,7 +183,7 @@ show_info() {
 # ============================================================
 
 do_install() {
-  echo "=== Artoo 首次部署（Compose: $COMPOSE_CMD）==="
+  echo "=== Artoo 首次部署（Compose: ${COMPOSE_CMD}）==="
 
   echo "[1/5] 加载 Docker 镜像..."
   for f in *.tar; do
@@ -221,7 +231,7 @@ do_start() {
 do_stop() {
   local SERVICE="${2:-}"
   if [[ -n "$SERVICE" ]]; then
-    echo "=== 停止服务: $SERVICE（数据保留）==="
+    echo "=== 停止服务: ${SERVICE}（数据保留）==="
     $COMPOSE_CMD -f "$COMPOSE_FILE" stop "$SERVICE"
   else
     echo "=== 停止全部服务（数据保留）==="
@@ -260,7 +270,7 @@ do_update() {
     found_tar=1
     local mtime_h
     mtime_h=$(date -d "@$(stat -c %Y "$f" 2>/dev/null || echo 0)" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || echo "未知")
-    echo "  load $f（修改于 $mtime_h）"
+    echo "  load ${f}（修改于 ${mtime_h}）"
     docker load -i "$f"
   done
   if [[ "$found_tar" -eq 0 ]]; then

@@ -1073,6 +1073,9 @@ class DocumentPipeline:
     ) -> str:
         """处理嵌入图片：并发 OCR 识别，按页位置将图片文本插入到对应页面文本之后
 
+        对 PDF 中已由可信文本层覆盖的整页扫描底图跳过 OCR，避免同一页的隐藏文本层
+        与扫描图 OCR 结果被拼接成双份正文。普通嵌入图片仍按原有规则处理。
+
         Args:
             load_result: 文档加载结果
             doc_id: 文档 ID
@@ -1080,7 +1083,20 @@ class DocumentPipeline:
         Returns:
             合并了图片 OCR 文本的最终文档文本
         """
-        images = load_result.images
+        images = [
+            image for image in load_result.images
+            if not image.is_page_background
+        ]
+        skipped_page_backgrounds = len(load_result.images) - len(images)
+        if skipped_page_backgrounds:
+            logger.info(
+                "文档 %s 跳过 %d 张整页扫描底图 OCR（页面已有可信文本层）",
+                doc_id,
+                skipped_page_backgrounds,
+            )
+        if not images:
+            return load_result.content
+
         logger.info("文档 %s 开始并发处理 %d 张嵌入图片 OCR", doc_id, len(images))
 
         # 并发 OCR 识别所有图片

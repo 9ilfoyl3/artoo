@@ -1,40 +1,41 @@
-import { useEffect, useState } from 'react'
-import { X, Download, FileText } from 'lucide-react'
+import { lazy, Suspense, useEffect, useState } from 'react'
+import { X, Download, FileText, Loader2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { documentApi, sessionFileApi } from '@/lib/api'
 import { useArtifactStore, type ArtifactTarget } from '@/stores/artifactStore'
-import PdfPreview from './previews/PdfPreview'
-import ImagePreview from './previews/ImagePreview'
-import TextPreview from './previews/TextPreview'
-import MarkdownPreview from './previews/MarkdownPreview'
-import CsvPreview from './previews/CsvPreview'
+
+// 预览引擎整体懒加载：open-file-viewer 与 pdf worker 只在首次打开面板时下载。
+const OpenFileViewerPreview = lazy(() => import('./previews/OpenFileViewerPreview'))
+
+const PANEL_WIDTH = 'w-[clamp(420px,42vw,860px)]'
+
+function PanelSpinner() {
+  return (
+    <div className="h-full flex items-center justify-center">
+      <Loader2 className="h-6 w-6 animate-spin text-primary/60" />
+    </div>
+  )
+}
 
 /**
  * Artifact 公用预览面板。
  *
- * 设计要点（满足需求）：
- * - 从右侧滑入，作为 flex 兄弟节点「占用空间」（非浮层）：宽度 0 ↔ 固定宽度过渡，
- *   主内容区被自然挤压，配合 transition 形成流畅推拉动画。
- * - 承载不同类型的预览器（registry 按 fileType 分发）：PDF / 图片走 blob objectURL，
- *   txt / md / csv 走纯文本内容。office 暂不支持（需重依赖）。
- * - 原件字节由本组件统一按来源（document / session-file）拉取为 blob，按类别派生
- *   objectURL 或文本，并在切换 / 卸载时 revoke，避免内存泄漏。
- *   数据流单向：store(target) → fetch → previewer。
+ * 设计要点：
+ * - 外层职责不变：右侧滑入、占用布局空间（非浮层）、统一按来源（document /
+ *   session-file）带鉴权拉取原件为 blob objectURL，切换 / 卸载时 revoke，
+ *   头部提供下载与关闭。
+ * - 内层预览能力统一下放给 open-file-viewer（React 适配层）：按插件匹配渲染
+ *   PDF / 图片 / 文本 / Markdown / CSV / Office / 邮件 / 压缩包等格式，
+ *   本组件不再按 fileType 维护各自的预览器。
+ *   数据流单向：store(target) → fetch → objectURL → OpenFileViewerPreview。
  */
-
-const PANEL_WIDTH = 'w-[clamp(420px,42vw,860px)]'
-
-// 文本类预览（读取 blob.text()）与二进制类预览（用 objectURL）分流
-const TEXT_TYPES = new Set(['txt', 'md', 'csv'])
 
 function ArtifactPanel() {
   const { open, target, closeArtifact } = useArtifactStore()
 
-  // 关闭动画期间保留内容，动画结束后再清空，避免内容在滑出过程中闪烁/塌缩。
+  // 关闭动画期间保留内容，动画结束后再清空，避免内容在滑出过程中闪烁/塌陷。
   const [mountedTarget, setMountedTarget] = useState<ArtifactTarget | null>(target)
   const [objectUrl, setObjectUrl] = useState<string | null>(null)
-  const [textContent, setTextContent] = useState<string | null>(null)
-  const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   // 同步 target：打开或切换文件时立即更新挂载内容
@@ -42,17 +43,13 @@ function ArtifactPanel() {
     if (target) setMountedTarget(target)
   }, [target])
 
-  // 拉取原件，按来源选择接口、按类型派生 objectURL / 文本；切换/卸载时 revoke
+  // 拉取原件为 blob objectURL；切换/卸载时 revoke，避免内存泄漏
   useEffect(() => {
     if (!open || !target) return
     let revoked = false
     let createdUrl: string | null = null
     setObjectUrl(null)
-    setTextContent(null)
     setError(null)
-    setLoading(true)
-
-    const isText = TEXT_TYPES.has(target.fileType.toLowerCase())
 
     const fetchRaw =
       target.source === 'session-file' && target.sessionId
@@ -60,30 +57,16 @@ function ArtifactPanel() {
         : documentApi.rawFile(target.id)
 
     fetchRaw
-      .then(async (url) => {
+      .then((url) => {
         if (revoked) {
           URL.revokeObjectURL(url)
           return
         }
-        if (isText) {
-          // 文本类：读取内容后即可释放 objectURL（不需要长期持有）
-          try {
-            const resp = await fetch(url)
-            const txt = await resp.text()
-            if (!revoked) setTextContent(txt)
-          } finally {
-            URL.revokeObjectURL(url)
-          }
-        } else {
-          createdUrl = url
-          setObjectUrl(url)
-        }
+        createdUrl = url
+        setObjectUrl(url)
       })
       .catch((e) => {
         if (!revoked) setError(e instanceof Error ? e.message : '加载失败')
-      })
-      .finally(() => {
-        if (!revoked) setLoading(false)
       })
 
     return () => {
@@ -97,39 +80,23 @@ function ArtifactPanel() {
     if (!open) {
       setMountedTarget(null)
       setObjectUrl(null)
-      setTextContent(null)
       setError(null)
     }
   }
 
   function renderPreview() {
     if (!mountedTarget) return null
-    const type = mountedTarget.fileType.toLowerCase()
-    switch (type) {
-      case 'pdf':
-        return <PdfPreview objectUrl={objectUrl} error={error} />
-      case 'jpg':
-      case 'jpeg':
-      case 'png':
-        return <ImagePreview objectUrl={objectUrl} error={error} />
-      case 'txt':
-        return <TextPreview text={textContent} loading={loading} error={error} />
-      case 'md':
-        return <MarkdownPreview text={textContent} loading={loading} error={error} />
-      case 'csv':
-        return <CsvPreview text={textContent} loading={loading} error={error} />
-      default:
-        return (
-          <div className="h-full flex flex-col items-center justify-center gap-3 text-muted-foreground">
-            <FileText className="h-10 w-10 opacity-40" />
-            <p className="text-sm">暂不支持预览 .{type} 文件</p>
-          </div>
-        )
-    }
+    return (
+      <Suspense fallback={<PanelSpinner />}>
+        <OpenFileViewerPreview
+          objectUrl={objectUrl}
+          fileName={mountedTarget.filename}
+          error={error}
+        />
+      </Suspense>
+    )
   }
 
-  // 下载链接：文本类在拉取后已 revoke objectURL，故用接口直链兜底（带鉴权由浏览器走代理）。
-  // 这里统一在有 objectUrl 时提供下载；文本类不展示 objectURL 下载按钮（避免失效链接）。
   const canDownload = !!objectUrl && !!mountedTarget
 
   return (

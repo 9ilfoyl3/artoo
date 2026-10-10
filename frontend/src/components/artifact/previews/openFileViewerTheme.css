@@ -1,0 +1,72 @@
+/*
+ * Artoo 主题适配：把 open-file-viewer 的调色板整体映射到 artoo 的 CSS 变量，
+ * 颜色跟随应用主题（含暗色模式），不依赖 OFV 自身的 dark 主题类。
+ * 作用域限定在 .artoo-ofv，避免影响其它 OFV 实例。
+ */
+
+.artoo-ofv .ofv-root {
+  --ofv-bg: var(--muted);
+  --ofv-surface: var(--card);
+  /* 与 PDF 画布底色保持一致：Office 面板 (.ofv-panel)、搜索框都走这个变量 */
+  --ofv-surface-muted: var(--muted);
+  --ofv-text: var(--foreground);
+  --ofv-text-muted: var(--muted-foreground);
+  --ofv-border: var(--border);
+  --ofv-button-hover: color-mix(in srgb, var(--foreground) 7%, transparent);
+  /* 半透明主题色：搜索命中只给文字着底色，不遮盖字形 */
+  --ofv-highlight: color-mix(in srgb, var(--primary) 32%, transparent);
+  --ofv-accent: var(--primary);
+  --ofv-accent-soft: color-mix(in srgb, var(--primary) 18%, transparent);
+  --ofv-toolbar-bg: var(--card);
+
+  border: 0;
+  background: var(--card);
+}
+
+/* PDF 画布外的底色：原为深灰 #6b7280，改为融入面板的浅色 */
+.artoo-ofv .ofv-pdf,
+.artoo-ofv .ofv-pdf-viewer {
+  background: var(--muted);
+}
+
+.artoo-ofv .ofv-pdf::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--foreground) 24%, transparent);
+  background-clip: content-box;
+}
+
+/* 页面投影减淡，只保留细描边与轻微阴影 */
+.artoo-ofv .ofv-pdf-page-wrapper {
+  outline: 1px solid var(--border);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.08);
+}
+
+/* 文本选择与搜索命中统一走主题色 */
+.artoo-ofv .ofv-pdf-text-layer span::selection,
+.artoo-ofv .ofv-pdf-text-layer span::-moz-selection {
+  background: color-mix(in srgb, var(--primary) 24%, transparent);
+}
+
+/* 预览失败 / 下载兜底卡片：去掉重投影，改为轻边框卡面 */
+.artoo-ofv .ofv-fallback {
+  width: min(320px, calc(100% - 32px));
+  gap: 8px;
+  padding: 28px 24px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--card);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.04);
+}
+
+.artoo-ofv .ofv-fallback strong {
+  font-size: 14px;
+}
+
+.artoo-ofv .ofv-fallback span {
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+
+.artoo-ofv .ofv-fallback a {
+  color: var(--primary);
+  font-weight: 500;
+}

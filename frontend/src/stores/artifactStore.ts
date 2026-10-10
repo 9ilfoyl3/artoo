@@ -40,8 +40,48 @@ export const useArtifactStore = create<ArtifactState>((set) => ({
   closeArtifact: () => set({ open: false }),
 }))
 
-/** 当前可被 artifact 预览的文件类型（随 previewer 增加而扩展）。 */
-const PREVIEWABLE_TYPES = new Set(['pdf', 'jpg', 'jpeg', 'png', 'txt', 'md', 'csv'])
+/**
+ * 当前可被 artifact 预览的文件类型。
+ * 与 OpenFileViewerPreview 注册的插件能力保持一致（媒体 / 3D / GIS 类暂不开放入口）。
+ */
+const PREVIEWABLE_TYPES = new Set([
+  'pdf',
+  // 图片
+  'jpg',
+  'jpeg',
+  'png',
+  'gif',
+  'webp',
+  'bmp',
+  'svg',
+  // 文本
+  'txt',
+  'md',
+  'csv',
+  // Office 文档
+  'doc',
+  'docx',
+  'docm',
+  'dot',
+  'rtf',
+  'odt',
+  // 表格
+  'xls',
+  'xlsx',
+  'xlsm',
+  'xlsb',
+  // 演示文稿
+  'ppt',
+  'pps',
+  'pptx',
+  'pptm',
+  'odp',
+  // 邮件 / 压缩包 / 电子书
+  'eml',
+  'msg',
+  'zip',
+  'epub',
+])
 
 export function isPreviewable(fileType: string | undefined | null): boolean {
   if (!fileType) return false

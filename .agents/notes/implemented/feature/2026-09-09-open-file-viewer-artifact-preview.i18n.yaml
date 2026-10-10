@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record: the Git blob hash of each side as of the
+# last confirmed-consistent state. Both languages carry equal authority; after
+# editing either side, bring the other along and re-record both hashes with:
+#   git hash-object .agents/notes/implemented/feature/2026-09-09-open-file-viewer-artifact-preview.md .agents/notes/implemented/feature/2026-09-09-open-file-viewer-artifact-preview.zh.md
+2026-09-09-open-file-viewer-artifact-preview.md: 89bd57101ded5453588313588d3ca9c7d93cb7de
+2026-09-09-open-file-viewer-artifact-preview.zh.md: bb7be39d9015b480ff15bc6385d66a3fd1b750d3

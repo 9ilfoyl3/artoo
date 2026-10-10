@@ -91,7 +91,7 @@ Fully modular from parsing, vectorization, and retrieval to LLM inference — ev
 | ReAct Reasoning | The LLM decides autonomously within a Think → Act → Observe loop: call tools, analyze results, decide when to stop |
 | Tool Calling | Built-in knowledge search, keyword matching, deep reading, attachment reading, web search, thinking, skill loading; remote MCP tools |
 | Evidence-First | Progressive RAG prompt enforces "search, deep-read chunks, then answer" with inline citations and no fabrication |
-| Agent Presets | Built-in "Quick Q&A" (single-pass hybrid) and "Smart Reasoning" (multi-step agent); prompts editable via AI rewrite |
+| Agent Presets | Built-in "Quick Q&A" (single-pass hybrid) and "Smart Reasoning" (multi-step agent); prompts editable via AI rewrite, and super-admins can choose any platform-level preset as the global default |
 | Session Attachments | Files uploaded mid-conversation are indexed instantly as session-level retrieval sources; the agent reads them whole and deterministically via `read_attachment`, without competing for ranking against the formal KB |
 | Context Management | Three-tier progressive compression (token estimation + usage tracking + LLM summary + group truncation) |
 | Streaming Visibility | Thoughts, tool calls, citations, and token usage streamed via SSE and rendered token-by-token |
@@ -101,6 +101,7 @@ Fully modular from parsing, vectorization, and retrieval to LLM inference — ev
 | Capability | Details |
 |------------|---------|
 | Document Formats | PDF / Word / Excel / PPT / TXT / Markdown / images / audio |
+| File Preview | Unified artifact side-panel preview (open-file-viewer): PDF / Word / Excel / PPT / images / text / Markdown / CSV / email / archives / EPUB — ~30 formats; one-click preview from chat attachments and document lists, Word pages fit panel width by default, colors follow the app theme |
 | Link Import | Paste a web / WeChat article link; the backend fetches and extracts the main text as Markdown and saves it into the KB, retaining the source URL and cover image — mobile-friendly |
 | Document Organization | Folder hierarchy management, rename, thumbnail preview (authenticated fetch) |
 | Mixed Content | Auto-extracts embedded images, runs concurrent OCR, inserts recognized text by page position, hash-dedups |
