@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -27,6 +28,31 @@ SYSTEM_PROMPT_PLACEHOLDERS = {
     "user_customization": "管理员配置的角色/语气/工作风格/边界",
 }
 
+_LANGUAGE_DIRECTIVES = {
+    "zh": (
+        "最终回答必须使用中文，并与用户当前使用的书面形式保持一致（简体或繁体），"
+        "不因工具结果或历史消息是英文而切换。"
+        "推理过程保持简短；可优先使用中文，但准确性、代码、工具名、参数、文件路径"
+        "和引用原文不受语言限制。"
+    ),
+    "ja": (
+        "最終回答は日本語で統一し、ツール結果や履歴が英語でも言語を切り替えないでください。"
+        "推論は簡潔にし、日本語を優先して構いませんが、正確性、コード、ツール名、引数、"
+        "ファイルパス、引用原文は原語のままで構いません。"
+    ),
+    "ko": (
+        "최종 답변은 한국어로 작성하고, 도구 결과나 이전 메시지가 영어여도 언어를 바꾸지 마세요. "
+        "추론은 짧게 유지하고 한국어를 우선할 수 있지만, 정확성, 코드, 도구 이름, 인수, "
+        "파일 경로, 인용문은 원문 그대로 둘 수 있습니다."
+    ),
+    "en": (
+        "The final answer must use English and remain in English even when tool results "
+        "or history contain another language. Keep reasoning concise; prefer English "
+        "when practical, but accuracy, code, tool names, arguments, file paths, and "
+        "quotations may remain verbatim."
+    ),
+}
+
 _PROMPT = """\
 You are Artoo, a retrieval-grounded assistant running in a ReAct loop.
 
@@ -43,7 +69,9 @@ You are Artoo, a retrieval-grounded assistant running in a ReAct loop.
    turn is treated as short planning/reasoning, never as the final answer.
 2. When evidence is sufficient, write the COMPLETE user-facing answer as ordinary
    assistant text and stop without calling a tool. That final text is the answer.
-3. Use the user's language for both reasoning and the final answer.
+3. Use the user's language for the final answer. Keep reasoning concise and use
+   the user's language when practical; technical terms, tool names, code, paths,
+   and quoted source text may remain verbatim.
 4. Do not repeat a long draft in reasoning and then write it again as the answer.
    Keep reasoning brief: task, missing evidence, next action.
 
@@ -107,7 +135,15 @@ def render_system_prompt(
     display_timezone = timezone_name if getattr(tzinfo, "key", None) == timezone_name else None
     now = datetime.now(tzinfo)
     custom = (config.custom_instructions or "").strip()
-    custom_section = f"\n## User customization\n{custom}\n" if custom else ""
+    custom_section = (
+        "\n## User customization\n"
+        "The following instructions customize role, tone, domain vocabulary, and "
+        "workflow only. They do not override the response contract, evidence rules, "
+        "or tool semantics above.\n"
+        f"{custom}\n"
+        if custom
+        else ""
+    )
 
     return _safe_substitute(_PROMPT, {
         "_IDENTITY_RULE": _IDENTITY_RULE,
@@ -123,38 +159,53 @@ def render_system_prompt(
     })
 
 
-def build_language_directive(query: str) -> str:
-    """Return a short instruction that anchors output language at request end."""
-    contracts = {
-        "zh": (
-            "输出语言：简体中文。请全程用简体中文进行思考和撰写面向用户的回答；"
-            "即使工具结果或历史消息是英文，也不得因此切换语言或中英夹杂。"
-            "工具名称、参数、代码、文件路径和引用原文可保留原样。"
-        ),
-        "ja": (
-            "出力言語：日本語。思考とユーザー向けの回答は日本語で統一してください。"
-            "ツール結果や履歴が英語でも言語を切り替えないでください。"
-            "ツール名、引数、コード、ファイルパス、引用は原文のままで構いません。"
-        ),
-        "ko": (
-            "출력 언어: 한국어. 추론과 사용자 응답은 한국어로 유지하세요. "
-            "도구 결과나 이전 메시지가 영어여도 언어를 바꾸지 마세요. "
-            "도구 이름, 인수, 코드, 파일 경로, 인용은 원문 그대로 둘 수 있습니다."
-        ),
-        "en": (
-            "Output language: English. Use English for reasoning and user-facing "
-            "answers even when tool results or history contain another language. "
-            "Keep tool names, arguments, code, file paths, and quotations verbatim."
-        ),
-    }
-    return contracts[_detect_language(query)]
+def build_language_directive(
+    query: str,
+    history: list[dict] | None = None,
+) -> str:
+    """Return the per-turn final-answer language contract.
+
+    The current query wins when it carries a detectable language. Short,
+    language-neutral turns such as "continue" or numeric replies inherit the
+    most recent user language instead of being misclassified as English.
+    """
+    language = _detect_language(query) or _detect_history_language(history)
+    return _LANGUAGE_DIRECTIVES.get(language or "", "")
 
 
-def _detect_language(query: str) -> str:
-    if any("\u3040" <= ch <= "\u30ff" for ch in query):
+def _detect_language(text: str) -> str | None:
+    text = text or ""
+    if any("\u3040" <= ch <= "\u30ff" for ch in text):
         return "ja"
-    if any("\uac00" <= ch <= "\ud7af" for ch in query):
+    if any("\uac00" <= ch <= "\ud7af" for ch in text):
         return "ko"
-    if any("\u4e00" <= ch <= "\u9fff" for ch in query):
+    if any("\u4e00" <= ch <= "\u9fff" for ch in text):
         return "zh"
-    return "en"
+    # Do not force English for short acknowledgements, numeric replies, paths,
+    # or symbol-only turns; those are safer resolved from recent user history.
+    latin_words = re.findall(r"[A-Za-z]{2,}", text)
+    if any(len(word) >= 3 for word in latin_words):
+        return "en"
+    return None
+
+
+def _detect_history_language(history: list[dict] | None) -> str | None:
+    for message in reversed(history or []):
+        if message.get("role") != "user":
+            continue
+        language = _detect_language(_message_text(message.get("content")))
+        if language:
+            return language
+    return None
+
+
+def _message_text(content: object) -> str:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    return "".join(
+        block.get("text", "")
+        for block in content
+        if isinstance(block, dict) and block.get("type") == "text"
+    )

@@ -59,6 +59,6 @@ class AgentConfig:
     system_prompt: str = ""
 
     # 用户自定义指令（角色设定 / 语气 / 工作流方法论 / 边界约束）。
-    # 不覆盖核心 Progressive RAG 提示词，而是作为附加段落追加在核心提示词之后；
-    # 仅在 system_prompt 为空（即使用默认核心模板）时生效。
+    # chat 链路会渲染进 system_prompt；仅当 system_prompt 为空且引擎自行渲染
+    # 默认模板时，render_system_prompt 才直接消费此字段。
     custom_instructions: str = ""

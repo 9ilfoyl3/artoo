@@ -660,7 +660,7 @@ function AgentConfig() {
               />
               <div className="flex items-center justify-between mt-1.5">
                 <p className="text-xs text-muted-foreground">
-                  仅在「智能推理」模式下生效，会在系统内置提示词基础上追加，不影响核心检索能力
+                  仅在「智能推理」模式下生效，用来定制角色、语气与工作流；输出语言默认跟随用户输入，无需在这里重复
                 </p>
                 <span className="text-xs text-muted-foreground tabular-nums">
                   {form.custom_instructions.length} / {CUSTOM_INSTRUCTIONS_MAX}
