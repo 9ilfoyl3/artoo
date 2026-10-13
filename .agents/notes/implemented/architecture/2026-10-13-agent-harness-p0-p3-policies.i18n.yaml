@@ -2,5 +2,5 @@
 # last confirmed-consistent state. Both languages carry equal authority; after
 # editing either side, bring the other along and re-record both hashes with:
 #   git hash-object .agents/notes/implemented/architecture/2026-10-13-agent-harness-p0-p3-policies.md .agents/notes/implemented/architecture/2026-10-13-agent-harness-p0-p3-policies.zh.md
-2026-10-13-agent-harness-p0-p3-policies.md: 936f5075b1806213801d04a10e0e1df187d10524
-2026-10-13-agent-harness-p0-p3-policies.zh.md: 9bfa1ae6046a473517b5e90867d365317c7e5519
+2026-10-13-agent-harness-p0-p3-policies.md: afcaf269a14f4794537837e7927c42837c80f7e6
+2026-10-13-agent-harness-p0-p3-policies.zh.md: 453ae83bf3ec9ee535a3060fc48ff84f18a26d6c

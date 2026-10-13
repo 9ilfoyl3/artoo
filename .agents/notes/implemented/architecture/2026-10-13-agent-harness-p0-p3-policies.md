@@ -98,6 +98,9 @@ canonical signatures, repeat reminders, context pruning, exact formal-KB cache
 hits, cache-key separation, and session-source cache exclusion.
 
 `backend/benchmarks/agent_harness_ab.py` reports deterministic A/B metrics. The
-current fixture result is 6 to 3 queries after deduplication, a first repeat
-reminder after 3 calls, 20,000 to 5,159 characters for one pruned historical
-tool result, and 2 to 1 retrievals for two identical cached searches.
+current fixture result is 6 to 3 queries after deduplication, 12 to 6 logical
+backend search units for two retrieval targets, a first repeat reminder after 3
+calls, 2 to 1 retrievals for two identical cached searches, and 9,114 to 4,014
+estimated context tokens after pruning six historical tool results. The
+baseline crosses the summary threshold while the pruned context does not, avoiding
+one LLM summarization call.

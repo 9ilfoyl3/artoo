@@ -62,4 +62,4 @@ Agent loop 会减少完全重复调用和重复 query 带来的浪费，在考�
 
 `backend/tests/test_agent_harness_p0_p3.py` 覆盖 query 规范化、canonical 签名、重复提醒、上下文裁剪、正式 KB 精确缓存命中、缓存 key 隔离和会话源缓存排除。
 
-`backend/benchmarks/agent_harness_ab.py` 输出确定性 A/B 指标。当前 fixture 结果为：去重后 query 从 6 降到 3；连续调用第 3 次出现首个提醒；单个历史工具结果从 20,000 字符降到 5,159 字符；两次相同缓存检索从 2 次底层检索降到 1 次。
+`backend/benchmarks/agent_harness_ab.py` 输出确定性 A/B 指标。当前 fixture 结果为：去重后 query 从 6 降到 3；两个检索目标下，逻辑底层检索单元从 12 降到 6；连续调用第 3 次出现首个提醒；两次相同缓存检索从 2 次底层检索降到 1 次；六个历史工具结果裁剪后，估算上下文 token 从 9,114 降到 4,014。基线会跨过摘要阈值，而裁剪后不会，因此避免一次 LLM 摘要调用。

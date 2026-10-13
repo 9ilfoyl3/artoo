@@ -11,7 +11,6 @@ import asyncio
 import json
 
 from app.agent.harness import RepeatToolTracker, dedupe_queries
-from app.agent.memory.context_manager import prune_tool_output
 from app.agent.memory.compress import prune_context
 from app.agent.memory.token_estimator import TokenEstimator
 from app.agent.tools.knowledge_search import KnowledgeSearchTool, SearchTarget
@@ -43,7 +42,7 @@ class _MemoryCache:
         self.values[self._key(kb_id, query, mode, **kwargs)] = list(results)
 
 
-def _query_dedup_metrics() -> dict:
+def _retrieval_agent_loop_metrics() -> dict:
     raw_queries = [
         "contract liability",
         " Contract   Liability ",
@@ -53,51 +52,11 @@ def _query_dedup_metrics() -> dict:
         "unused fourth query",
     ]
     optimized = dedupe_queries(raw_queries, limit=3)
-    return {
-        "baseline_queries": len(raw_queries),
-        "optimized_queries": len(optimized),
-        "removed_queries": len(raw_queries) - len(optimized),
-    }
-
-
-def _repeat_guard_metrics() -> dict:
     tracker = RepeatToolTracker()
     reminders = sum(
         tracker.observe("echo", {"value": 1}) is not None
         for _ in range(6)
     )
-    return {
-        "baseline_reminders": 0,
-        "optimized_reminders": reminders,
-        "calls_before_first_reminder": 3,
-    }
-
-
-def _pruning_metrics() -> dict:
-    huge = "x" * 20_000
-    messages = [
-        {"role": "system", "content": "system"},
-        {"role": "assistant", "content": "", "tool_calls": []},
-        {"role": "tool", "tool_call_id": "call-1", "content": huge},
-        {"role": "user", "content": "current query"},
-    ]
-    estimator = TokenEstimator()
-    pruned, count = prune_context(
-        messages,
-        100,
-        estimator.estimate_messages(messages),
-        tail_start_index=3,
-    )
-    bounded = prune_tool_output(huge, 4096, 1024)
-    return {
-        "baseline_chars": len(huge),
-        "optimized_chars": len(bounded),
-        "pruned_messages": count,
-        "optimized_chars_saved": len(huge) - len(pruned[2]["content"]),
-    }
-
-
-def _cache_metrics() -> dict:
     result = RetrievalResult(
         chunk_id="chunk-1",
         content="cached",
@@ -121,19 +80,104 @@ def _cache_metrics() -> dict:
     asyncio.run(cached_tool._search_with_cache(SearchTarget("kb-1"), "query", 5))
     asyncio.run(cached_tool._search_with_cache(SearchTarget("kb-1"), "query", 5))
 
+    target_count = 2
+    baseline_search_units = len(raw_queries) * target_count
+    optimized_search_units = len(optimized) * target_count
     return {
-        "baseline_retrievals": no_cache_retriever.calls,
-        "optimized_retrievals": cached_retriever.calls,
-        "cache_hits": 1,
+        "query_batch": {
+            "baseline_queries": len(raw_queries),
+            "optimized_queries": len(optimized),
+            "duplicates_removed": len(raw_queries) - len(optimized),
+        },
+        "backend_search_units": {
+            "targets": target_count,
+            "baseline": baseline_search_units,
+            "optimized": optimized_search_units,
+            "reduction_percent": round(
+                (baseline_search_units - optimized_search_units)
+                / baseline_search_units
+                * 100,
+                1,
+            ),
+        },
+        "repeat_guard": {
+            "identical_calls": 6,
+            "baseline_reminders": 0,
+            "optimized_reminders": reminders,
+            "first_reminder_at_call": 3,
+        },
+        "retrieval_cache": {
+            "identical_searches": 2,
+            "baseline_backend_retrievals": no_cache_retriever.calls,
+            "optimized_backend_retrievals": cached_retriever.calls,
+            "cache_hit_rate": 0.5,
+        },
+    }
+
+
+def _context_governance_metrics() -> dict:
+    estimator = TokenEstimator()
+    tool_result_count = 6
+    tool_result_chars = 12_000
+    max_context_tokens = 12_000
+    prune_threshold_tokens = max_context_tokens // 2
+    messages = [{"role": "system", "content": "system"}]
+    for index in range(tool_result_count):
+        messages.extend([
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": f"call-{index}",
+                    "type": "function",
+                    "function": {"name": "knowledge_search", "arguments": "{}"},
+                }],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": f"call-{index}",
+                "content": "x" * tool_result_chars,
+            },
+        ])
+    messages.append({
+        "role": "user",
+        "content": "current query\n\n<response_contract>clock</response_contract>",
+    })
+    baseline_tokens = estimator.estimate_messages(messages)
+    pruned, pruned_messages = prune_context(
+        messages,
+        max_context_tokens,
+        baseline_tokens,
+        tail_start_index=len(messages) - 1,
+        threshold_ratio=0.5,
+        head_chars=4096,
+        tail_chars=1024,
+    )
+    optimized_tokens = estimator.estimate_messages(pruned)
+    return {
+        "historical_tool_results": tool_result_count,
+        "tool_result_chars_each": tool_result_chars,
+        "prune_threshold_tokens": prune_threshold_tokens,
+        "baseline_context_tokens": baseline_tokens,
+        "optimized_context_tokens": optimized_tokens,
+        "token_reduction_percent": round(
+            (baseline_tokens - optimized_tokens) / baseline_tokens * 100,
+            1,
+        ),
+        "pruned_tool_results": pruned_messages,
+        "baseline_summary_triggered": baseline_tokens > prune_threshold_tokens,
+        "optimized_summary_triggered": optimized_tokens > prune_threshold_tokens,
+        "llm_summaries_avoided": int(
+            baseline_tokens > prune_threshold_tokens
+            and optimized_tokens <= prune_threshold_tokens
+        ),
     }
 
 
 def run() -> dict:
     return {
-        "query_dedup": _query_dedup_metrics(),
-        "repeat_guard": _repeat_guard_metrics(),
-        "context_pruning": _pruning_metrics(),
-        "retrieval_cache": _cache_metrics(),
+        "retrieval_agent_loop": _retrieval_agent_loop_metrics(),
+        "context_governance": _context_governance_metrics(),
     }
 
 
