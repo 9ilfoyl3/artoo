@@ -67,3 +67,11 @@ def render_runtime_context(timezone_name: str | None = None) -> str:
         _TIME_RULE,
         f"- Current date/time: {format_local_time(now, display_name)}",
     ])
+
+
+def render_clock_context(timezone_name: str | None = None) -> str:
+    """Render the per-turn clock snapshot without changing the stable prompt."""
+    tzinfo = resolve_timezone(timezone_name)
+    display_name = timezone_name if getattr(tzinfo, "key", None) == timezone_name else None
+    now = datetime.now(tzinfo)
+    return f"- Current date/time: {format_local_time(now, display_name)}"

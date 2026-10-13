@@ -36,17 +36,43 @@ class RetrievalCache:
         self._ttl = ttl
 
     @staticmethod
-    def _build_key(kb_id: str, query: str, mode: str) -> str:
+    def _build_key(
+        kb_id: str,
+        query: str,
+        mode: str,
+        *,
+        scope: str = "",
+        top_k: int | None = None,
+        tenant_id: str | None = None,
+        config_version: str = "",
+    ) -> str:
         """构建缓存 key
 
         格式: rag:cache:{kb_id}:{hash}
         hash 基于 query + mode 生成，16 位足够避免碰撞
         """
-        raw = f"{query}:{mode}"
+        raw = "\0".join([
+            query,
+            mode,
+            scope,
+            "" if top_k is None else str(top_k),
+            tenant_id or "",
+            config_version,
+        ])
         hash_val = hashlib.sha256(raw.encode()).hexdigest()[:16]
         return f"{KEY_PREFIX}:{kb_id}:{hash_val}"
 
-    async def get(self, kb_id: str, query: str, mode: str) -> Optional[list[RetrievalResult]]:
+    async def get(
+        self,
+        kb_id: str,
+        query: str,
+        mode: str,
+        *,
+        scope: str = "",
+        top_k: int | None = None,
+        tenant_id: str | None = None,
+        config_version: str = "",
+    ) -> Optional[list[RetrievalResult]]:
         """获取缓存的检索结果
 
         Args:
@@ -60,7 +86,15 @@ class RetrievalCache:
         if not self._redis:
             return None
 
-        key = self._build_key(kb_id, query, mode)
+        key = self._build_key(
+            kb_id,
+            query,
+            mode,
+            scope=scope,
+            top_k=top_k,
+            tenant_id=tenant_id,
+            config_version=config_version,
+        )
         try:
             data = await self._redis.get(key)
             if data is None:
@@ -85,7 +119,18 @@ class RetrievalCache:
             logger.warning("读取缓存失败（降级为无缓存）: %s", e)
             return None
 
-    async def set(self, kb_id: str, query: str, mode: str, results: list[RetrievalResult]) -> None:
+    async def set(
+        self,
+        kb_id: str,
+        query: str,
+        mode: str,
+        results: list[RetrievalResult],
+        *,
+        scope: str = "",
+        top_k: int | None = None,
+        tenant_id: str | None = None,
+        config_version: str = "",
+    ) -> None:
         """写入检索结果缓存
 
         Args:
@@ -97,7 +142,15 @@ class RetrievalCache:
         if not self._redis or not results:
             return
 
-        key = self._build_key(kb_id, query, mode)
+        key = self._build_key(
+            kb_id,
+            query,
+            mode,
+            scope=scope,
+            top_k=top_k,
+            tenant_id=tenant_id,
+            config_version=config_version,
+        )
         try:
             items = [
                 {

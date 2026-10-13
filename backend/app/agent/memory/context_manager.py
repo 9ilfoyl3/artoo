@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import re
 
+PRUNE_MARKER = "\n\n[... tool result middle pruned ...]\n\n"
+
 
 def estimate_tokens(text: str) -> int:
     """估算文本的 token 数量
@@ -64,6 +66,19 @@ def truncate_tool_output(output: str, max_chars: int) -> str:
     tail = output[-tail_size:]
 
     return f"{head}[...truncated {truncated_count} chars...]{tail}"
+
+
+def prune_tool_output(output: str, head_chars: int, tail_chars: int) -> str:
+    """Keep bounded head and tail spans from one historical tool result."""
+    if not output:
+        return output
+    if head_chars < 0 or tail_chars < 0:
+        return output
+    if len(output) <= head_chars + len(PRUNE_MARKER) + tail_chars:
+        return output
+    head = output[:head_chars] if head_chars else ""
+    tail = output[-tail_chars:] if tail_chars else ""
+    return f"{head}{PRUNE_MARKER}{tail}"
 
 
 def redact_historical_kb_results(

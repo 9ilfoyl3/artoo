@@ -17,7 +17,8 @@ from dataclasses import dataclass
 from app.agent.config import AgentConfig
 from app.agent.content_classifier import ChannelFragment, PlainContentClassifier
 from app.agent.events import AgentEvent, EventBus, EventType
-from app.agent.memory.compress import compress_context
+from app.agent.harness import RepeatToolTracker
+from app.agent.memory.compress import compress_context, prune_context
 from app.agent.memory.consolidator import MemoryConsolidator
 from app.agent.memory.token_estimator import TokenEstimator
 from app.agent.memory.usage_tracker import UsageTracker
@@ -47,6 +48,18 @@ _KB_TOOL_NAMES = {"knowledge_search", "grep_chunks", "search_knowledge_base"}
 _KB_REDACTION_MARKER = "[Previous retrieval omitted — perform a fresh search.]"
 _TURN_CONTRACT_OPEN = "<response_contract>"
 _TURN_CONTRACT_CLOSE = "</response_contract>"
+
+
+def _find_current_turn_start(messages: list[dict]) -> int:
+    """Return the current turn's marker-bearing user message."""
+    for index in range(len(messages) - 1, 0, -1):
+        message = messages[index]
+        if (
+            message.get("role") == "user"
+            and _TURN_CONTRACT_OPEN in (message.get("content") or "")
+        ):
+            return index
+    return len(messages) - 1
 
 
 def _redact_history_kb_results(messages: list[dict]) -> list[dict]:
@@ -193,6 +206,7 @@ class AgentEngine:
         )
         self._last_query = ""
         self._language_directive = ""
+        self._clock_context = ""
 
     async def execute(
         self,
@@ -226,16 +240,22 @@ class AgentEngine:
 
         try:
             from app.agent.prompts.progressive_rag import build_language_directive
+            from app.agent.prompts.runtime_context import render_clock_context
             self._language_directive = build_language_directive(query, llm_context)
+            self._clock_context = render_clock_context(self._config.timezone_name)
         except Exception as exc:
             self._language_directive = ""
+            self._clock_context = ""
             logger.warning("[Agent] failed to build language directive: %s", exc)
 
         user_content = query
-        if self._language_directive:
+        turn_context = "\n\n".join(
+            part for part in (self._language_directive, self._clock_context) if part
+        )
+        if turn_context:
             user_content = (
                 f"{query}\n\n{_TURN_CONTRACT_OPEN}\n"
-                f"{self._language_directive}\n"
+                f"{turn_context}\n"
                 f"{_TURN_CONTRACT_CLOSE}"
             )
         messages.append({"role": "user", "content": user_content})
@@ -257,12 +277,27 @@ class AgentEngine:
         session_id: str,
     ) -> None:
         empty_retries = 0
+        repeat_tracker = (
+            RepeatToolTracker() if self._config.repeat_tool_reminder_enabled else None
+        )
 
         while state.current_round < self._config.max_iterations:
             iteration = state.current_round
             logger.info("[Agent][Round-%d/%d] starting", iteration + 1, self._config.max_iterations)
 
             current_tokens = self._usage_tracker.estimate_current_tokens(messages)
+            if self._config.context_pruning_enabled:
+                messages, pruned_count = prune_context(
+                    messages,
+                    self._config.max_context_tokens,
+                    current_tokens,
+                    tail_start_index=_find_current_turn_start(messages),
+                    threshold_ratio=self._config.context_prune_threshold,
+                    head_chars=self._config.context_prune_head_chars,
+                    tail_chars=self._config.context_prune_tail_chars,
+                )
+                if pruned_count:
+                    current_tokens = self._usage_tracker.estimate_current_tokens(messages)
             if self._consolidator.should_consolidate(current_tokens):
                 messages = await self._consolidator.consolidate(messages)
                 current_tokens = self._usage_tracker.estimate_current_tokens(messages)
@@ -337,13 +372,38 @@ class AgentEngine:
                     for call in response.tool_calls
                 ],
             })
-            tool_results = await self._execute_tool_calls(response.tool_calls, step, session_id)
-            for call, result in tool_results:
+            tool_results = await self._execute_tool_calls(
+                response.tool_calls,
+                step,
+                session_id,
+                repeat_tracker=repeat_tracker,
+            )
+            rewrite_reminder_added = False
+            for call, result, reminder in tool_results:
                 messages.append({
                     "role": "tool",
                     "tool_call_id": call.id,
                     "content": result.output if result.success else (result.error or "Tool execution failed."),
                 })
+                if reminder:
+                    messages.append({"role": "user", "content": reminder})
+                if (
+                    not rewrite_reminder_added
+                    and result.data
+                    and result.data.get("suggest_rewrite")
+                    and state.query_rewrite_attempts
+                    < self._config.query_rewrite_max_attempts
+                ):
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "The latest retrieval returned no new evidence. "
+                            "Reformulate the query once with different entities, "
+                            "constraints, or wording before deciding to answer."
+                        ),
+                    })
+                    state.query_rewrite_attempts += 1
+                    rewrite_reminder_added = True
             state.steps.append(step)
             state.current_round += 1
 
@@ -367,6 +427,8 @@ class AgentEngine:
                 }
                 if self._config.max_output_tokens is not None:
                     call_kwargs["max_tokens"] = self._config.max_output_tokens
+                if self._config.reasoning_effort is not None:
+                    call_kwargs["reasoning_effort"] = self._config.reasoning_effort
 
                 async for chunk in self._llm.stream_with_tools(messages, tools, **call_kwargs):
                     await builder.add(chunk)
@@ -422,6 +484,7 @@ class AgentEngine:
             prompt = render_system_prompt(
                 self._config,
                 available_tools=self._tool_registry.list_tools(),
+                include_clock=False,
             )
             messages: list[dict] = [
                 {"role": "system", "content": prompt},
@@ -440,8 +503,15 @@ class AgentEngine:
                     "Based only on the observations above, write the complete final "
                     "answer in the required language. Stop after the answer."
                     + (
-                        f"\n\n{self._language_directive}"
-                        if self._language_directive
+                        "\n\n" + "\n\n".join(
+                            part
+                            for part in (
+                                self._language_directive,
+                                self._clock_context,
+                            )
+                            if part
+                        )
+                        if self._language_directive or self._clock_context
                         else ""
                     )
                 ),
@@ -470,7 +540,9 @@ class AgentEngine:
         tool_calls: list[LLMToolCall],
         step: AgentStep,
         session_id: str,
-    ) -> list[tuple[LLMToolCall, ToolResult]]:
+        *,
+        repeat_tracker: RepeatToolTracker | None = None,
+    ) -> list[tuple[LLMToolCall, ToolResult, str | None]]:
         parsed: list[tuple[LLMToolCall, dict]] = []
         for call in tool_calls:
             try:
@@ -499,7 +571,7 @@ class AgentEngine:
         else:
             outcomes = [await self._execute_single_tool(call, args) for call, args in parsed]
 
-        results: list[tuple[LLMToolCall, ToolResult]] = []
+        results: list[tuple[LLMToolCall, ToolResult, str | None]] = []
         for (call, args), (result, duration_ms) in zip(parsed, outcomes):
             step.tool_calls.append(ToolCallRecord(
                 id=call.id,
@@ -520,7 +592,12 @@ class AgentEngine:
                     "files": (result.data or {}).get("files", []),
                 },
             ))
-            results.append((call, result))
+            reminder = (
+                repeat_tracker.observe(call.function_name, args)
+                if repeat_tracker is not None
+                else None
+            )
+            results.append((call, result, reminder))
 
         return results
 

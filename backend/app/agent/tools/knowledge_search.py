@@ -15,10 +15,12 @@ import logging
 from dataclasses import dataclass
 from xml.sax.saxutils import escape as xml_escape
 
+from app.agent.harness import dedupe_queries
 from app.agent.state import AgentState
 from app.agent.tools.base import BaseTool, ToolResult
 from app.agent.tools.doc_files import build_tool_files
 from app.retrieval.base import RetrievalResult
+from app.retrieval.cache import RetrievalCache
 from app.retrieval.hybrid import HybridRetriever
 from app.retrieval.log_safety import sanitize_for_log
 
@@ -57,12 +59,18 @@ class KnowledgeSearchTool(BaseTool):
         knowledge_base_ids: list[str] | None = None,
         tenant_id: str | None = None,
         search_targets: list[SearchTarget] | None = None,
+        dedupe_queries_enabled: bool = True,
+        max_queries_per_call: int = 3,
+        cache: RetrievalCache | None = None,
     ):
         self._retriever = retriever
         self._state = state
         # 显式租户 ID（H5）：透传给底层 hybrid.search，避免 agent 模式在流式响应中
         # contextvar 已 reset 时丢失租户检索配置；None 时底层回退 contextvar。
         self._tenant_id = tenant_id
+        self._dedupe_queries_enabled = dedupe_queries_enabled
+        self._max_queries_per_call = max(1, min(int(max_queries_per_call), 3))
+        self._cache = cache
 
         # 检索源装配（agent-session-source-unification）：
         # 优先用显式 search_targets（新装配层传入，可含会话源 + 多库）；
@@ -115,10 +123,10 @@ class KnowledgeSearchTool(BaseTool):
             "properties": {
                 "queries": {
                     "type": "array",
-                    "description": "1-5 semantic questions or conceptual statements for retrieval",
+                    "description": "1-3 semantic questions or conceptual statements for retrieval",
                     "items": {"type": "string"},
                     "minItems": 1,
-                    "maxItems": 5,
+                    "maxItems": 3,
                 },
                 "top_k": {
                     "type": "integer",
@@ -146,12 +154,23 @@ class KnowledgeSearchTool(BaseTool):
         若 LLM 经 ``knowledge_base_ids`` 指定子集，仅在已授权正式 KB 源内取交集
         （不引入新 kb、不影响会话源是否参与——后者由装配层决定，Property 5）。
         """
-        queries: list[str] = args.get("queries", [])
+        raw_queries = args.get("queries", [])
+        if self._dedupe_queries_enabled:
+            queries = dedupe_queries(raw_queries, limit=self._max_queries_per_call)
+        else:
+            queries = [
+                query.strip()
+                for query in raw_queries
+                if isinstance(query, str) and query.strip()
+            ][:self._max_queries_per_call]
         top_k: int = args.get("top_k", 10)
         kb_ids_param: list[str] | None = args.get("knowledge_base_ids")
 
         if not queries:
-            return ToolResult(success=False, error="queries parameter is required")
+            return ToolResult(
+                success=False,
+                error="queries parameter must contain at least one non-empty query",
+            )
 
         # 确定本次检索的源列表：
         # - LLM 指定了 knowledge_base_ids → 在已授权正式 KB 源内取交集 + 始终保留会话源
@@ -187,9 +206,7 @@ class KnowledgeSearchTool(BaseTool):
         flat_targets = [t for t in targets for _ in queries]
         try:
             search_tasks = [
-                self._retriever.search_with_degraded(
-                    query=q, kb_id=t.kb_id, top_k=top_k, expr=t.expr, tenant_id=self._tenant_id
-                )
+                self._search_with_cache(t, q, top_k)
                 for t in targets
                 for q in queries
             ]
@@ -205,6 +222,7 @@ class KnowledgeSearchTool(BaseTool):
         # 合并所有结果，过滤异常
         # 任一子检索抛异常（某源/query 失败）或返回 degraded=True（三路路级降级）→ 标记降级。
         merged: list[RetrievalResult] = []
+        cache_hits = 0
         for i, item in enumerate(all_results_nested):
             failed_kb = flat_targets[i].kb_id if i < len(flat_targets) else None
             if isinstance(item, Exception):
@@ -219,7 +237,9 @@ class KnowledgeSearchTool(BaseTool):
                     if failed_kb:
                         self._state.failed_source_ids.add(failed_kb)
                 continue
-            result, route_degraded = item
+            result, route_degraded, cache_hit = item
+            if cache_hit:
+                cache_hits += 1
             if route_degraded and self._state is not None:
                 self._state.degraded = True
                 if failed_kb:
@@ -251,7 +271,17 @@ class KnowledgeSearchTool(BaseTool):
                 "DO NOT use training data or general knowledge to answer. "
                 "State that no relevant information was found."
             )
-            return ToolResult(success=True, output=output)
+            return ToolResult(
+                success=True,
+                output=output,
+                data={
+                    "count": 0,
+                    "new_count": 0,
+                    "files": [],
+                    "suggest_rewrite": True,
+                    "cache_hits": cache_hits,
+                },
+            )
 
         # XML 格式化输出
         output = self._format_xml_output(results_with_status)
@@ -267,12 +297,63 @@ class KnowledgeSearchTool(BaseTool):
         files = await build_tool_files(
             [result.doc_id for result, seen in results_with_status if not seen]
         )
+        new_count = sum(1 for _, seen in results_with_status if not seen)
 
         return ToolResult(
             success=True,
             output=output,
-            data={"count": len(results_with_status), "files": files},
+            data={
+                "count": len(results_with_status),
+                "new_count": new_count,
+                "files": files,
+                "suggest_rewrite": new_count == 0,
+                "cache_hits": cache_hits,
+            },
         )
+
+    async def _search_with_cache(
+        self,
+        target: SearchTarget,
+        query: str,
+        top_k: int,
+    ) -> tuple[list[RetrievalResult], bool, bool]:
+        """Search one target/query pair, using an exact-scope cache when available."""
+        # Session sources carry mutable per-session data and do not yet have a
+        # dedicated generation key, so only stable formal KB targets are cached.
+        cache_enabled = self._cache is not None and target.expr is None
+        cache_scope = target.expr or ""
+        if cache_enabled:
+            assert self._cache is not None
+            cached = await self._cache.get(
+                target.kb_id,
+                query,
+                "agent",
+                scope=cache_scope,
+                top_k=top_k,
+                tenant_id=self._tenant_id,
+            )
+            if cached is not None:
+                return cached, False, True
+
+        result, route_degraded = await self._retriever.search_with_degraded(
+            query=query,
+            kb_id=target.kb_id,
+            top_k=top_k,
+            expr=target.expr,
+            tenant_id=self._tenant_id,
+        )
+        if cache_enabled and not route_degraded and result:
+            assert self._cache is not None
+            await self._cache.set(
+                target.kb_id,
+                query,
+                "agent",
+                result,
+                scope=cache_scope,
+                top_k=top_k,
+                tenant_id=self._tenant_id,
+            )
+        return result, route_degraded, False
 
     def _deduplicate_by_chunk_id(
         self, results: list[RetrievalResult]
