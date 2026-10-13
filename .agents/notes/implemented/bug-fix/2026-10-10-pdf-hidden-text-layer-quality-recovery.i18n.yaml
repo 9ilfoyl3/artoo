@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record: the Git blob hash of each side as of the
+# last confirmed-consistent state. Both languages carry equal authority; after
+# editing either side, bring the other along and re-record both hashes with:
+#   git hash-object .agents/notes/implemented/bug-fix/2026-10-10-pdf-hidden-text-layer-quality-recovery.md .agents/notes/implemented/bug-fix/2026-10-10-pdf-hidden-text-layer-quality-recovery.zh.md
+2026-10-10-pdf-hidden-text-layer-quality-recovery.md: 1f304634045701e6087bdbd6500e7b88fa145a03
+2026-10-10-pdf-hidden-text-layer-quality-recovery.zh.md: 2d536ba8b2d0c3d8ffd6a9cbb4cdda3c372fc4f4
