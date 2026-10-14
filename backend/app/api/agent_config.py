@@ -136,6 +136,15 @@ _BUILTIN_PRESETS = [
             "max_iterations": 20,
             "thinking_enabled": True,
             "temperature": 0.7,
+            "allowed_tools": [
+                "knowledge_search",
+                "grep_chunks",
+                "list_knowledge_chunks",
+                "read_document",
+                "list_knowledge_documents",
+                "summarize_documents",
+                "calculate",
+            ],
         },
         "is_default": True,
         "tenant_id": None,
@@ -313,6 +322,11 @@ async def _ensure_builtin_presets() -> None:
                 existing.tenant_id = None
                 existing.owner_user_id = None
                 existing.is_shared = True
+                # 内置预设由平台维护，随版本升级合并规范配置。用户自定义预设
+                # 不在此路径，避免静默扩大其工具权限。
+                merged_config = dict(existing.config_json or {})
+                merged_config.update(preset_data["config_json"])
+                existing.config_json = merged_config
 
         await session.flush()
         result = await session.execute(

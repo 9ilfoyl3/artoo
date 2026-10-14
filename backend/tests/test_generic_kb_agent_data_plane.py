@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.api import agent_config
 from app.agent.config import AgentConfig
 from app.agent.evidence import evidence_id_for, register_chunk_evidence
 from app.agent.engine import AgentEngine
@@ -20,7 +22,7 @@ from app.agent.tools.list_documents import ListKnowledgeDocumentsTool
 from app.agent.tools.summarize_documents import SummarizeDocumentsTool
 from app.agent.tools.registry import ToolRegistry
 from app.models.provider import LLMToolCall, StreamChunk
-from app.schema.db import Base, Chunk, Document, KnowledgeBase, SessionFile
+from app.schema.db import AgentPreset, Base, Chunk, Document, KnowledgeBase, SessionFile
 
 
 async def _make_session_factory(tmp_path):
@@ -105,6 +107,53 @@ class _InventoryAwareLLM:
             tool_calls=[LLMToolCall("call-1", "knowledge_search", "{}")],
             finish_reason="tool_calls",
         )
+
+
+def test_builtin_smart_reasoning_preset_upgrades_to_new_kb_tools(
+    tmp_path, monkeypatch
+):
+    async def run():
+        engine, factory = await _make_session_factory(tmp_path)
+        try:
+            monkeypatch.setattr(agent_config, "async_session", factory)
+            async with factory() as session:
+                session.add(
+                    AgentPreset(
+                        id="preset-smart-reasoning",
+                        name="智能推理",
+                        config_json={
+                            "agent_mode": "agent",
+                            "allowed_tools": [
+                                "knowledge_search",
+                                "grep_chunks",
+                                "list_knowledge_chunks",
+                            ],
+                            "custom_rollout_flag": True,
+                        },
+                        is_default=True,
+                        tenant_id=None,
+                        owner_user_id=None,
+                        is_shared=True,
+                    )
+                )
+                await session.commit()
+
+            await agent_config._ensure_builtin_presets()
+
+            async with factory() as session:
+                preset = await session.get(AgentPreset, "preset-smart-reasoning")
+                assert preset is not None
+                assert preset.config_json["custom_rollout_flag"] is True
+                assert {
+                    "list_knowledge_documents",
+                    "read_document",
+                    "summarize_documents",
+                    "calculate",
+                }.issubset(set(preset.config_json["allowed_tools"]))
+        finally:
+            await engine.dispose()
+
+    asyncio.run(run())
 
 
 def test_document_catalog_lists_only_authorized_completed_documents(tmp_path, monkeypatch):
@@ -227,6 +276,23 @@ def test_prompt_guides_collection_tasks_when_catalog_tool_is_available():
     assert "Document collection tasks" in prompt
     assert "Never infer missing files" in prompt
     assert "summarize_documents" in prompt
+
+
+def test_summary_skills_prefer_catalog_and_document_tools():
+    skill_root = (
+        Path(__file__).resolve().parents[1]
+        / "app"
+        / "agent"
+        / "skills"
+        / "preloaded"
+    )
+    for skill_name in ("meeting-summarizer", "document-analyzer"):
+        instructions = (skill_root / skill_name / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        assert "list_knowledge_documents" in instructions
+        assert "read_document" in instructions
+        assert "summarize_documents" in instructions
 
 
 def test_deterministic_calculator_uses_decimal_and_rejects_unsafe_input():

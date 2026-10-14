@@ -24,6 +24,9 @@ Agent 此前只有搜索与读取工具，没有确定性的文档发现面。�
 
 对于集合型请求，system prompt 要求模型先列文档再宽泛搜索，只使用返回的 doc_id，绝不从编号推断文件，并报告未读或不可用文档。若检索已用完有界改写机会且仍没有新增证据，loop 会确定性提示模型调用文档目录。
 
+内置 `preset-smart-reasoning` 预设由平台维护，启动同步时会把当前规范
+`allowed_tools` 合并进旧数据库行，避免 Agent 永久停留在旧搜索/读取工具集。用户自定义预设不会被改写，需要由所有者显式勾选新工具。预置摘要与文档分析技能也会优先使用文档清单、`read_document` 和 `summarize_documents`，仅在新工具不可用时退化为旧搜索/读取路径。
+
 这些工具都是通用能力，不包含法律、财务、案件管理或文书审批语义。
 
 ## Alternatives considered
@@ -44,12 +47,12 @@ Agent 此前只有搜索与读取工具，没有确定性的文档发现面。�
 
 集合任务现在从权威文档目录开始，可以识别失败或不可用文档，并区分完整读取与部分读取。多文档摘要让每份文档在隔离上下文中处理，只向主循环返回紧凑的逐文档结果。重复摘要可以复用按版本计算的缓存，精确计算也不再占用推理通道。
 
-显式白名单工具的自定义预设需要加入 `list_knowledge_documents`、`read_document`、`summarize_documents` 和 `calculate`。没有 `allowed_tools` 列表的既有预设仍可看到完整工具集。map-reduce 会在工具内部增加模型调用，但这些调用替代了更大的主循环上下文增长，并避免反复宽泛搜索。Redis 是可选加速路径，不是正确性依赖。
+显式白名单工具的自定义预设需要加入 `list_knowledge_documents`、`read_document`、`summarize_documents` 和 `calculate`。没有 `allowed_tools` 列表的既有预设仍可看到完整工具集。内置智能推理预设会自动同步到该列表；用户自定义预设仍由所有者控制。map-reduce 会在工具内部增加模型调用，但这些调用替代了更大的主循环上下文增长，并避免反复宽泛搜索。Redis 是可选加速路径，不是正确性依赖。
 
 Open API 请求和 SSE 事件结构不变。新工具结果仍是普通 Agent tool observation，通过 `ToolResult.data` 携带结构化数据。
 
 ## Testing
 
-`backend/tests/test_generic_kb_agent_data_plane.py` 覆盖授权文档清单、分页、会话文件接入、仅父块读取、跨页覆盖、稳定 evidence 身份、有界空检索目录回退、确定性 Decimal 计算、缓存键失效，以及逐文档 map-reduce 摘要。
+`backend/tests/test_generic_kb_agent_data_plane.py` 覆盖授权文档清单、分页、会话文件接入、仅父块读取、跨页覆盖、稳定 evidence 身份、有界空检索目录回退、确定性 Decimal 计算、缓存键失效，以及逐文档 map-reduce 摘要。回归测试还会验证旧内置预设行在不丢弃其他配置键的前提下完成升级，并验证预置摘要技能优先使用文档清单和读取/摘要工具。
 
 `backend/benchmarks/generic_kb_agent_ab.py` 在本地 PostgreSQL KB 上运行。对 7 文档本地 KB，仅搜索路径使用 4 次搜索、11 个 query 找到 6 份可读文档；目录路径用 1 次调用识别出 6 份可读和 1 份失败文档，并摘要全部 6 份可读文档。确定性 map-reduce 把 9,977 个父块字符压缩为 1,157 个摘要字符（88.4%），第二次相同摘要产生 6 次缓存命中且没有新增 map 调用。对 48 文档 KB，仅搜索发现 38 份且未暴露 2 份失败；目录识别全部 46 份可用文档，map-reduce 摘要全部 46 份，把父块正文从 154,304 字符压缩到 10,038 字符（93.5%）。第二次相同摘要产生 46 次缓存命中且没有新增 map 调用。

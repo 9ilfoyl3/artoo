@@ -55,6 +55,13 @@ from numbering, and report unread or unavailable documents. If retrieval has
 already exhausted its bounded rewrite opportunity and still produces no new
 evidence, the loop deterministically points the model to the document catalog.
 
+The built-in `preset-smart-reasoning` preset is platform-owned and merges the
+current canonical `allowed_tools` list during startup synchronization, so old
+database rows do not keep the Agent on the legacy search/read tool set. User
+presets are not rewritten; their owners must opt in explicitly. Preloaded
+summary and document-analysis skills also prefer the catalog, `read_document`,
+and `summarize_documents`, with the legacy search/read path only as a fallback.
+
 These tools are generic. They contain no legal, financial, case-management, or
 document-approval semantics.
 
@@ -97,9 +104,11 @@ reasoning channel.
 Custom presets that explicitly whitelist tools must add
 `list_knowledge_documents`, `read_document`, `summarize_documents`, and
 `calculate`. Existing presets without an `allowed_tools` list continue to see
-the complete tool set. Map-reduce adds model calls inside the tool, but those
-calls replace larger main-loop context growth and avoid repeated broad
-searches. Redis is an optional acceleration path, not a correctness dependency.
+the complete tool set. The built-in smart-reasoning preset is synchronized to
+this list automatically; custom presets remain owner-controlled. Map-reduce
+adds model calls inside the tool, but those calls replace larger main-loop
+context growth and avoid repeated broad searches. Redis is an optional
+acceleration path, not a correctness dependency.
 
 Open API request and SSE event structures are unchanged. The new tool results
 remain ordinary Agent tool observations with structured `ToolResult.data`.
@@ -110,7 +119,9 @@ remain ordinary Agent tool observations with structured `ToolResult.data`.
 listing, pagination, session-file inclusion, parent-only reads, cross-page
 coverage, stable evidence identity, the bounded empty-retrieval inventory
 fallback, deterministic Decimal calculation, cache-key invalidation, and
-per-document map-reduce summarization.
+per-document map-reduce summarization. The regression suite also verifies that
+legacy built-in preset rows are upgraded without discarding unrelated config
+keys, and that preloaded summary skills prefer the catalog and document tools.
 
 `backend/benchmarks/generic_kb_agent_ab.py` runs against local PostgreSQL KBs.
 On a 7-document local KB, search-only discovery used 4 search calls and 11
