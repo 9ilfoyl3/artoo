@@ -11,6 +11,7 @@ from sqlalchemy import func, select
 from xml.sax.saxutils import escape as xml_escape
 
 from app.agent.state import AgentState
+from app.agent.evidence import evidence_id_for, register_chunk_evidence
 from app.agent.tools.base import BaseTool, ToolResult
 from app.schema.db import Chunk, SessionChunk
 from app.storage.database import async_session
@@ -164,6 +165,16 @@ class ListKnowledgeChunksTool(BaseTool):
                 read_chunks = len(chunks)
                 fully_read = page >= total_pages
                 if self._state is not None:
+                    for chunk in chunks:
+                        register_chunk_evidence(
+                            self._state,
+                            doc_id=doc_id,
+                            chunk_id=chunk.id,
+                            content=chunk.content or "",
+                            source="session-file" if is_session_file else "document",
+                            metadata={"chunk_index": chunk.chunk_index},
+                        )
+                if self._state is not None:
                     read_ranges = self._state.document_read_ranges.setdefault(
                         doc_id, set()
                     )
@@ -199,6 +210,7 @@ class ListKnowledgeChunksTool(BaseTool):
                         "next_page": page + 1 if page < total_pages else None,
                         "read_chunks": read_chunks,
                         "fully_read": fully_read,
+                        "evidence_count": len(self._state.evidence),
                     },
                 )
 
@@ -236,8 +248,19 @@ class ListKnowledgeChunksTool(BaseTool):
 
         for chunk in chunks:
             position = chunk.chunk_index if chunk.chunk_index is not None else 0
+            evidence_id = (
+                self._state.evidence_by_chunk.get(chunk.id)
+                if self._state is not None
+                else evidence_id_for(doc_id, chunk.id)
+            )
+            evidence_attr = (
+                f' evidence_id="{xml_escape(evidence_id)}"'
+                if evidence_id
+                else ""
+            )
             lines.append(
-                f'<chunk position="{position}" chunk_id="{xml_escape(chunk.id)}">'
+                f'<chunk position="{position}" chunk_id="{xml_escape(chunk.id)}"'
+                f'{evidence_attr}>'
             )
             lines.append(f"<content>{xml_escape(chunk.content)}</content>")
             lines.append("</chunk>")
@@ -251,3 +274,19 @@ class ListKnowledgeChunksTool(BaseTool):
                 f"with page={page + 1}.]"
             )
         return "\n".join(lines)
+
+
+class ReadDocumentTool(ListKnowledgeChunksTool):
+    """Preferred generic document reader; preserves legacy list tool behavior."""
+
+    @property
+    def name(self) -> str:
+        return "read_document"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Read a complete document by doc_id, one bounded page at a time. "
+            "Returns read_chunks and fully_read so collection tasks can verify "
+            "coverage. Continue with next_page until fully_read=true."
+        )

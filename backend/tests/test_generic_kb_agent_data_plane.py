@@ -7,12 +7,15 @@ import asyncio
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.agent.config import AgentConfig
+from app.agent.evidence import evidence_id_for, register_chunk_evidence
 from app.agent.engine import AgentEngine
 from app.agent.events import EventBus
 from app.agent.prompts.progressive_rag import render_system_prompt
 from app.agent.state import AgentState
+from app.agent.summary_cache import SummaryCache
 from app.agent.tools.base import BaseTool, ToolResult
-from app.agent.tools.list_chunks import ListKnowledgeChunksTool
+from app.agent.tools.calculator import CalculateTool
+from app.agent.tools.list_chunks import ListKnowledgeChunksTool, ReadDocumentTool
 from app.agent.tools.list_documents import ListKnowledgeDocumentsTool
 from app.agent.tools.summarize_documents import SummarizeDocumentsTool
 from app.agent.tools.registry import ToolRegistry
@@ -35,6 +38,17 @@ class _FakeSummaryLLM:
     async def generate(self, messages, **kwargs):
         self.calls += 1
         return "faithful summary"
+
+
+class _MemorySummaryCache:
+    def __init__(self):
+        self.values: dict[str, str] = {}
+
+    async def get(self, key: str) -> str | None:
+        return self.values.get(key)
+
+    async def set(self, key: str, summary: str) -> None:
+        self.values[key] = summary
 
 
 class _SuggestRewriteTool(BaseTool):
@@ -160,6 +174,28 @@ def test_document_catalog_lists_only_authorized_completed_documents(tmp_path, mo
     asyncio.run(run())
 
 
+def test_evidence_state_has_stable_id_and_chunk_index():
+    state = AgentState()
+    first = register_chunk_evidence(
+        state,
+        doc_id="doc-1",
+        chunk_id="chunk-1",
+        content="source text",
+        source="read_document",
+    )
+    second = register_chunk_evidence(
+        state,
+        doc_id="doc-1",
+        chunk_id="chunk-1",
+        content="source text",
+        source="read_document",
+    )
+
+    assert first == (evidence_id_for("doc-1", "chunk-1"), True)
+    assert second == (first[0], False)
+    assert state.evidence[first[0]]["excerpt"] == "source text"
+
+
 def test_empty_retrieval_falls_back_to_document_inventory_once():
     llm = _InventoryAwareLLM()
     registry = ToolRegistry()
@@ -191,6 +227,35 @@ def test_prompt_guides_collection_tasks_when_catalog_tool_is_available():
     assert "Document collection tasks" in prompt
     assert "Never infer missing files" in prompt
     assert "summarize_documents" in prompt
+
+
+def test_deterministic_calculator_uses_decimal_and_rejects_unsafe_input():
+    calculator = CalculateTool()
+
+    result = asyncio.run(calculator.execute({
+        "expression": "(750 + 1120 - 1600)",
+        "precision": 2,
+        "rounding": "half_up",
+    }))
+    percentage = asyncio.run(calculator.execute({
+        "expression": "percent(30, 100)",
+    }))
+    traversal = asyncio.run(calculator.execute({
+        "expression": "__import__('os').system('id')",
+    }))
+
+    assert result.success is True
+    assert result.data["result"] == "270.00"
+    assert percentage.data["result"] == "30.00"
+    assert traversal.success is False
+
+
+def test_summary_cache_key_changes_with_document_version_or_instruction():
+    base = SummaryCache.build_key("doc-1", "v1", "model-a", "Summarize")
+    changed_version = SummaryCache.build_key("doc-1", "v2", "model-a", "Summarize")
+    changed_instruction = SummaryCache.build_key("doc-1", "v1", "model-a", "Extract risks")
+
+    assert len({base, changed_version, changed_instruction}) == 3
 
 
 def test_document_catalog_paginates_without_merging_unauthorized_kbs(tmp_path, monkeypatch):
@@ -326,7 +391,9 @@ def test_document_read_uses_parent_chunks_and_tracks_coverage(tmp_path, monkeypa
                 await session.commit()
 
             state = AgentState()
-            tool = ListKnowledgeChunksTool(state=state)
+            tool = ReadDocumentTool(state=state)
+            assert tool.name == "read_document"
+            assert ListKnowledgeChunksTool(state=state).name == "list_knowledge_chunks"
             first = await tool.execute({"doc_id": "doc-a", "page": 1, "page_size": 1})
             second = await tool.execute({"doc_id": "doc-a", "page": 2, "page_size": 1})
 
@@ -411,13 +478,20 @@ def test_document_summarizer_maps_each_document_independently(tmp_path, monkeypa
 
             llm = _FakeSummaryLLM()
             state = AgentState()
-            tool = SummarizeDocumentsTool(llm=llm, state=state)
+            cache = _MemorySummaryCache()
+            tool = SummarizeDocumentsTool(llm=llm, state=state, cache=cache)
             result = await tool.execute({
+                "doc_ids": ["doc-a", "doc-b"],
+                "instruction": "Summarize the core points.",
+            })
+            cached_result = await tool.execute({
                 "doc_ids": ["doc-a", "doc-b"],
                 "instruction": "Summarize the core points.",
             })
 
             assert result.success is True
+            assert llm.calls == 2
+            assert cached_result.data["cache_hits"] == 2
             assert llm.calls == 2
             assert result.data["documents"][0]["chunk_count"] == 2
             assert "A child" not in result.output

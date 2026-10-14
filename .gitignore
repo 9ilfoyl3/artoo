@@ -80,6 +80,7 @@ backend/tests/*
 !backend/tests/test_agent_output_language_contract.py
 !backend/tests/test_agent_harness_p0_p3.py
 !backend/tests/test_generic_kb_agent_data_plane.py
+!backend/tests/test_structured_result.py
 
 # E2E 调试脚本
 backend/_e2e_*.py

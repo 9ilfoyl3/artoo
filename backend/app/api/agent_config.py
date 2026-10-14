@@ -171,13 +171,23 @@ _BUILTIN_TOOL_CATALOG: list[dict] = [
     },
     {
         "name": "list_knowledge_chunks",
-        "label": "分页浏览",
-        "description": "按原文顺序分页浏览文档分块",
+        "label": "分页浏览（兼容）",
+        "description": "旧版分页读取工具；新预设建议使用 read_document",
+    },
+    {
+        "name": "read_document",
+        "label": "完整读取",
+        "description": "按 doc_id 分页读取完整文档，并返回 fully_read 覆盖状态",
     },
     {
         "name": "summarize_documents",
         "label": "文档摘要",
         "description": "按 doc_id 并行生成单文档摘要，适合全库总结与跨文档汇总",
+    },
+    {
+        "name": "calculate",
+        "label": "确定性计算",
+        "description": "执行 decimal 四则运算、百分比与舍入，避免模型在推理中进行易错计算",
     },
     {
         "name": "web_search",

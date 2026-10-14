@@ -13,6 +13,8 @@ class ToolResult:
     output: str = ""
     data: dict[str, Any] | None = None
     error: str = ""
+    # 仅供宿主/前端渲染的通用结构化结果；原始 output 仍只进入模型上下文。
+    structured_content: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)

@@ -28,9 +28,10 @@ from app.agent.engine import AgentEngine
 from app.agent.events import AgentEvent, EventBus, EventType
 from app.agent.state import AgentState
 from app.agent.tools.base import ToolContext
+from app.agent.tools.calculator import CalculateTool
 from app.agent.tools.grep_chunks import GrepChunksTool
 from app.agent.tools.knowledge_search import KnowledgeSearchTool, SearchTarget
-from app.agent.tools.list_chunks import ListKnowledgeChunksTool
+from app.agent.tools.list_chunks import ListKnowledgeChunksTool, ReadDocumentTool
 from app.agent.tools.list_documents import ListKnowledgeDocumentsTool
 from app.agent.tools.read_attachment import ReadAttachmentTool
 from app.agent.tools.read_skill import ReadSkillTool
@@ -899,6 +900,8 @@ def _agent_event_to_sse(event: AgentEvent) -> dict | None:
     {"type": "text_delta", "content": "...", "iteration": 0}
     {"type": "tool_call", "tool_name": "...", "tool_call_id": "...", "iteration": 0}
     {"type": "tool_result", "tool_call_id": "...", "tool_name": "...", "success": true, "duration_ms": 350}
+    # MCP structuredContent 合法时额外带：
+    {"type": "tool_result", ..., "structured_content": {"kind": "...", "data": {}}}
     {"type": "turn_end", "finish_reason": "stop"}
     """
     if event.type == EventType.REASONING_DELTA:
@@ -924,7 +927,7 @@ def _agent_event_to_sse(event: AgentEvent) -> dict | None:
             "iteration": event.data.get("iteration", 0),
         }
     elif event.type == EventType.TOOL_RESULT:
-        return {
+        sse_data = {
             "type": "tool_result",
             "tool_call_id": event.data.get("tool_call_id", ""),
             "tool_name": event.data.get("tool_name", ""),
@@ -934,6 +937,11 @@ def _agent_event_to_sse(event: AgentEvent) -> dict | None:
             # 展示可点击预览的文件。落库进 agent_steps，历史回放可还原。
             "files": event.data.get("files", []),
         }
+        structured_content = event.data.get("structured_content")
+        if structured_content is not None:
+            # MCP 声明的结构化结果经通用校验后透传；原始工具正文仍不外发。
+            sse_data["structured_content"] = structured_content
+        return sse_data
     elif event.type == EventType.TURN_END:
         return {
             "type": "turn_end",
@@ -1110,10 +1118,14 @@ async def _build_agent_runtime(
     # grep_chunks / list_knowledge_chunks 仅作用于主库，不接会话源（design C2 决策，非遗漏）。
     if _tool_enabled("grep_chunks") and primary_kb_id:
         tool_registry.register(GrepChunksTool(bm25_retriever, primary_kb_id, state))
-    if _tool_enabled("list_knowledge_chunks"):
+    if _tool_enabled("read_document"):
+        tool_registry.register(ReadDocumentTool(state=state))
+    elif _tool_enabled("list_knowledge_chunks"):
         tool_registry.register(ListKnowledgeChunksTool(state=state))
     if _tool_enabled("summarize_documents"):
         tool_registry.register(SummarizeDocumentsTool(llm=llm, state=state))
+    if _tool_enabled("calculate"):
+        tool_registry.register(CalculateTool())
     # read_attachment：本条消息绑定附件 → 注册确定性整篇直读工具。file_id 在此锚定
     # （来自 request.attachments），LLM 不能指定/伪造，只能选读哪个 filename 或翻页，
     # 杜绝越权；附件解析不再丢进 knowledge_search 与知识库文档竞争召回（WeKnora 借鉴）。

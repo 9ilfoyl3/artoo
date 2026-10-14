@@ -52,6 +52,17 @@ class _DeterministicMapLLM:
         return summary
 
 
+class _MemorySummaryCache:
+    def __init__(self):
+        self.values: dict[str, str] = {}
+
+    async def get(self, key: str) -> str | None:
+        return self.values.get(key)
+
+    async def set(self, key: str, summary: str) -> None:
+        self.values[key] = summary
+
+
 async def _select_kb(kb_id: str | None) -> str:
     async with async_session() as session:
         if kb_id:
@@ -128,8 +139,10 @@ async def _optimized_inventory_and_summary(kb_id: str) -> dict:
         )
 
     llm = _DeterministicMapLLM()
-    summarizer = SummarizeDocumentsTool(llm=llm, state=state)
+    cache = _MemorySummaryCache()
+    summarizer = SummarizeDocumentsTool(llm=llm, state=state, cache=cache)
     summary_success = True
+    first_pass_cache_hits = 0
     for start in range(0, len(documents), 20):
         batch = documents[start:start + 20]
         summary_result = await summarizer.execute({
@@ -137,6 +150,17 @@ async def _optimized_inventory_and_summary(kb_id: str) -> dict:
             "instruction": "Summarize core points for coverage benchmarking.",
         })
         summary_success = summary_success and summary_result.success
+        first_pass_cache_hits += summary_result.data.get("cache_hits", 0)
+
+    second_pass_cache_hits = 0
+    llm_calls_after_first_pass = llm.calls
+    for start in range(0, len(documents), 20):
+        batch = documents[start:start + 20]
+        summary_result = await summarizer.execute({
+            "doc_ids": [doc["doc_id"] for doc in batch],
+            "instruction": "Summarize core points for coverage benchmarking.",
+        })
+        second_pass_cache_hits += summary_result.data.get("cache_hits", 0)
 
     return {
         "inventory_calls": 1,
@@ -149,6 +173,9 @@ async def _optimized_inventory_and_summary(kb_id: str) -> dict:
             1 for doc in state.document_catalog.values() if doc.get("fully_read")
         ),
         "map_summary_calls": llm.calls,
+        "llm_calls_before_second_pass": llm_calls_after_first_pass,
+        "cache_hits_first_pass": first_pass_cache_hits,
+        "cache_hits_second_pass": second_pass_cache_hits,
         "map_calls_per_document": round(
             llm.calls / max(1, len(state.document_catalog)),
             2,

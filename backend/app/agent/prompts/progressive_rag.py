@@ -25,6 +25,7 @@ SYSTEM_PROMPT_PLACEHOLDERS = {
     "web_search_status": "网络搜索是否启用",
     "runtime_clock": "当前日期与时间",
     "collection_guidance": "文档集合任务的确定性执行规则",
+    "calculation_guidance": "精确计算工具使用规则",
     "user_customization": "管理员配置的角色/语气/工作风格/边界",
 }
 
@@ -86,6 +87,8 @@ You are Artoo, a retrieval-grounded assistant running in a ReAct loop.
 - If evidence is absent or insufficient, say that plainly instead of guessing.
 
 {collection_guidance}
+
+{calculation_guidance}
 
 ## Bound knowledge bases
 {knowledge_base_names}
@@ -156,11 +159,12 @@ def render_system_prompt(
 
     collection_guidance = ""
     if "list_knowledge_documents" in tools:
+        read_tool = "read_document" if "read_document" in tools else "list_knowledge_chunks"
         summarize_step = (
             "- Prefer `summarize_documents` for multi-document summaries so each "
             "document is processed independently before final synthesis.\n"
             if "summarize_documents" in tools
-            else "- Read each selected document with `list_knowledge_chunks` and "
+            else f"- Read each selected document with `{read_tool}` and "
             "continue until `fully_read=\"true\"` or the requested scope is complete.\n"
         )
         collection_guidance = (
@@ -173,6 +177,13 @@ def render_system_prompt(
             "- Report unread, unavailable, or out-of-scope documents explicitly.\n"
         )
 
+    calculation_guidance = ""
+    if "calculate" in tools:
+        calculation_guidance = (
+            "- Use `calculate` for exact arithmetic instead of performing numeric "
+            "calculation inside reasoning. Never invent missing numeric inputs.\n"
+        )
+
     return _safe_substitute(_PROMPT, {
         "_IDENTITY_RULE": _IDENTITY_RULE,
         "_CAPABILITY_RULE": _CAPABILITY_RULE,
@@ -183,6 +194,7 @@ def render_system_prompt(
         "web_search_status": "Enabled." if web_on else "Disabled.",
         "runtime_clock": runtime_clock,
         "collection_guidance": collection_guidance,
+        "calculation_guidance": calculation_guidance,
         "user_customization": custom_section,
     })
 

@@ -42,7 +42,9 @@ _NUDGE_MESSAGE = (
 _EMPTY_FINAL_ANSWER = "抱歉，模型没有返回可展示的回答。请重试或调整问题。"
 _MAX_EMPTY_RETRIES = 2
 _MAX_TRANSIENT_RETRIES = 2
+_MAX_FEEDBACK_RETRIES = 2
 _TRANSIENT_HTTP_CODES = {429, 500, 502, 503, 504}
+_RETRYABLE_FEEDBACK_STATUSES = {"rejected", "needs_evidence", "retryable_error"}
 _STUCK_LOOP_THRESHOLD = 3
 _KB_TOOL_NAMES = {"knowledge_search", "grep_chunks", "search_knowledge_base"}
 _KB_REDACTION_MARKER = "[Previous retrieval omitted — perform a fresh search.]"
@@ -60,6 +62,61 @@ def _find_current_turn_start(messages: list[dict]) -> int:
         ):
             return index
     return len(messages) - 1
+
+
+def _tool_feedback_notice(
+    structured_content: dict | None,
+    *,
+    retry_budget: int | None = None,
+    exhausted: bool = False,
+) -> str:
+    """Render generic structured feedback as a bounded model-visible notice."""
+    if not structured_content:
+        return ""
+    feedback = structured_content.get("feedback")
+    if not isinstance(feedback, dict):
+        return ""
+    lines = [
+        "[Tool feedback]",
+        f"status={feedback.get('status', 'unknown')}",
+    ]
+    if feedback.get("code"):
+        lines.append(f"code={feedback['code']}")
+    if feedback.get("message"):
+        lines.append(f"message={feedback['message']}")
+    if feedback.get("recoverable") is not None:
+        lines.append(f"recoverable={str(bool(feedback['recoverable'])).lower()}")
+    actions = feedback.get("next_actions")
+    if isinstance(actions, list) and actions:
+        lines.append("next_actions=" + " | ".join(str(action) for action in actions))
+    if exhausted:
+        lines.append(
+            "retry_policy=budget_exhausted; do not retry this tool/status again "
+            "in this turn without a materially different approach"
+        )
+    elif retry_budget is not None:
+        lines.append(f"retry_policy=recoverable; retries_remaining={retry_budget}")
+    elif feedback.get("recoverable") is False:
+        lines.append("retry_policy=do_not_retry")
+    return "\n".join(lines)
+
+
+def _feedback_retry_key(
+    tool_name: str,
+    structured_content: dict | None,
+) -> tuple[str, str] | None:
+    """Return a bounded-retry key for recoverable structured feedback."""
+    if not structured_content:
+        return None
+    feedback = structured_content.get("feedback")
+    if not isinstance(feedback, dict):
+        return None
+    if feedback.get("recoverable") is not True:
+        return None
+    if feedback.get("status") not in _RETRYABLE_FEEDBACK_STATUSES:
+        return None
+    stable_code = feedback.get("code") or feedback.get("status")
+    return tool_name, str(stable_code)
 
 
 def _redact_history_kb_results(messages: list[dict]) -> list[dict]:
@@ -281,6 +338,7 @@ class AgentEngine:
             RepeatToolTracker() if self._config.repeat_tool_reminder_enabled else None
         )
         inventory_reminder_sent = False
+        feedback_retry_counts: dict[tuple[str, str], int] = {}
 
         while state.current_round < self._config.max_iterations:
             iteration = state.current_round
@@ -381,10 +439,35 @@ class AgentEngine:
             )
             rewrite_reminder_added = False
             for call, result, reminder in tool_results:
+                tool_content = (
+                    result.output
+                    if result.success
+                    else (result.error or "Tool execution failed.")
+                )
+                retry_key = _feedback_retry_key(
+                    call.function_name,
+                    result.structured_content,
+                )
+                retry_budget: int | None = None
+                exhausted = False
+                if retry_key is not None:
+                    attempts = feedback_retry_counts.get(retry_key, 0)
+                    if attempts < _MAX_FEEDBACK_RETRIES:
+                        retry_budget = _MAX_FEEDBACK_RETRIES - attempts
+                        feedback_retry_counts[retry_key] = attempts + 1
+                    else:
+                        exhausted = True
+                feedback_notice = _tool_feedback_notice(
+                    result.structured_content,
+                    retry_budget=retry_budget,
+                    exhausted=exhausted,
+                )
+                if feedback_notice:
+                    tool_content = f"{tool_content}\n\n{feedback_notice}"
                 messages.append({
                     "role": "tool",
                     "tool_call_id": call.id,
-                    "content": result.output if result.success else (result.error or "Tool execution failed."),
+                    "content": tool_content,
                 })
                 if reminder:
                     messages.append({"role": "user", "content": reminder})
@@ -598,17 +681,20 @@ class AgentEngine:
                 result=result,
                 duration_ms=duration_ms,
             ))
+            event_data = {
+                "tool_call_id": call.id,
+                "tool_name": call.function_name,
+                "success": result.success,
+                "duration_ms": duration_ms,
+                "iteration": step.iteration,
+                "files": (result.data or {}).get("files", []),
+            }
+            if result.structured_content is not None:
+                event_data["structured_content"] = result.structured_content
             await self._event_bus.emit(AgentEvent(
                 type=EventType.TOOL_RESULT,
                 session_id=session_id,
-                data={
-                    "tool_call_id": call.id,
-                    "tool_name": call.function_name,
-                    "success": result.success,
-                    "duration_ms": duration_ms,
-                    "iteration": step.iteration,
-                    "files": (result.data or {}).get("files", []),
-                },
+                data=event_data,
             ))
             reminder = (
                 repeat_tracker.observe(call.function_name, args)

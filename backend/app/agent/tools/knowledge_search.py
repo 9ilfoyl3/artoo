@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from xml.sax.saxutils import escape as xml_escape
 
 from app.agent.harness import dedupe_queries
+from app.agent.evidence import evidence_id_for, register_retrieval_evidence
 from app.agent.state import AgentState
 from app.agent.tools.base import BaseTool, ToolResult
 from app.agent.tools.doc_files import build_tool_files
@@ -291,6 +292,11 @@ class KnowledgeSearchTool(BaseTool):
             for result, _seen in results_with_status:
                 if not _seen:
                     self._state.knowledge_refs.append(result)
+                register_retrieval_evidence(
+                    self._state,
+                    result,
+                    source="knowledge_search",
+                )
 
         # 解析本次读到的文件（doc_id → 文件名/来源），供前端在工具步骤行内联展示可点击预览。
         # 仅纳入本次新命中（非 already_retrieved）的结果，避免重复罗列此前已展示过的文件。
@@ -308,6 +314,7 @@ class KnowledgeSearchTool(BaseTool):
                 "files": files,
                 "suggest_rewrite": new_count == 0,
                 "cache_hits": cache_hits,
+                "evidence_count": len(self._state.evidence) if self._state else 0,
             },
         )
 
@@ -411,18 +418,29 @@ class KnowledgeSearchTool(BaseTool):
         lines.append(f'<search_results count="{count}">')
 
         for rank, (result, is_seen) in enumerate(results_with_status, start=1):
+            evidence_id = (
+                self._state.evidence_by_chunk.get(result.chunk_id)
+                if self._state is not None
+                else evidence_id_for(result.doc_id, result.chunk_id)
+            )
+            evidence_attr = (
+                f' evidence_id="{xml_escape(evidence_id)}"'
+                if evidence_id
+                else ""
+            )
             if is_seen:
                 lines.append(
                     f'<chunk rank="{rank}" chunk_id="{xml_escape(result.chunk_id)}" '
                     f'doc_id="{xml_escape(result.doc_id)}" '
-                    f'score="{result.score:.2f}" status="already_retrieved">'
+                    f'score="{result.score:.2f}" status="already_retrieved"'
+                    f'{evidence_attr}>'
                 )
                 lines.append("<content>(content omitted, already returned)</content>")
             else:
                 lines.append(
                     f'<chunk rank="{rank}" chunk_id="{xml_escape(result.chunk_id)}" '
                     f'doc_id="{xml_escape(result.doc_id)}" '
-                    f'score="{result.score:.2f}">'
+                    f'score="{result.score:.2f}"{evidence_attr}>'
                 )
                 # 优先使用 child_content（精准命中部分），fallback 到 content（父块完整内容）
                 content = result.child_content if result.child_content else result.content

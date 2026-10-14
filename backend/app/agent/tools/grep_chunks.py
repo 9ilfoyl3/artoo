@@ -7,6 +7,7 @@
 import logging
 
 from app.agent.harness import normalize_query
+from app.agent.evidence import evidence_id_for, register_retrieval_evidence
 from app.agent.tools.base import BaseTool, ToolResult
 from app.agent.tools.doc_files import build_tool_files
 from app.retrieval.base import RetrievalResult
@@ -93,6 +94,11 @@ class GrepChunksTool(BaseTool):
                     new_count += 1
                     if self._state is not None:
                         self._state.knowledge_refs.append(result)
+                register_retrieval_evidence(
+                    self._state,
+                    result,
+                    source="grep_chunks",
+                )
                 results_with_status.append((result, already_seen))
 
             # XML 格式化输出
@@ -111,6 +117,7 @@ class GrepChunksTool(BaseTool):
                     "new_count": new_count,
                     "files": files,
                     "suggest_rewrite": new_count == 0,
+                    "evidence_count": len(self._state.evidence) if self._state else 0,
                 },
             )
 
@@ -126,9 +133,20 @@ class GrepChunksTool(BaseTool):
         lines = [f'<search_results count="{len(results_with_status)}">']
         for rank, (r, already_seen) in enumerate(results_with_status, 1):
             status = ' status="already_retrieved"' if already_seen else ""
+            evidence_id = (
+                self._state.evidence_by_chunk.get(r.chunk_id)
+                if self._state is not None
+                else evidence_id_for(r.doc_id, r.chunk_id)
+            )
+            evidence_attr = (
+                f' evidence_id="{xml_escape(evidence_id)}"'
+                if evidence_id
+                else ""
+            )
             lines.append(
                 f'<chunk rank="{rank}" chunk_id="{r.chunk_id}" '
-                f'doc_id="{r.doc_id}" score="{r.score:.4f}"{status}>'
+                f'doc_id="{r.doc_id}" score="{r.score:.4f}"'
+                f'{status}{evidence_attr}>'
             )
             if already_seen:
                 lines.append("<content>(content omitted, already returned)</content>")
