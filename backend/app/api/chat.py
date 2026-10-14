@@ -1052,6 +1052,11 @@ async def _build_agent_runtime(
             bm25_retriever=BM25Retriever(milvus),
         )
     bm25_retriever = BM25Retriever(milvus)
+    retrieval_cache = None
+    if preset_cfg.get("retrieval_cache_enabled", True):
+        from app.retrieval.cache import get_retrieval_cache
+
+        retrieval_cache = await get_retrieval_cache()
 
     state = AgentState()
     tool_registry = ToolRegistry()
@@ -1081,7 +1086,15 @@ async def _build_agent_runtime(
 
     if _tool_enabled("knowledge_search") and search_targets:
         tool_registry.register(
-            KnowledgeSearchTool(hybrid_retriever, state=state, tenant_id=tenant_id, search_targets=search_targets)
+            KnowledgeSearchTool(
+                hybrid_retriever,
+                state=state,
+                tenant_id=tenant_id,
+                search_targets=search_targets,
+                dedupe_queries_enabled=preset_cfg.get("query_dedup_enabled", True),
+                max_queries_per_call=preset_cfg.get("max_queries_per_call", 3),
+                cache=retrieval_cache,
+            )
         )
     # grep_chunks / list_knowledge_chunks 仅作用于主库，不接会话源（design C2 决策，非遗漏）。
     if _tool_enabled("grep_chunks") and primary_kb_id:
@@ -1152,6 +1165,7 @@ async def _build_agent_runtime(
         web_search_enabled=web_search_on,
         skills=[(m.name, m.description) for m in skill_metadata],
         timezone_name=timezone_name,
+        include_clock=False,
     )
     config = AgentConfig(
         max_iterations=preset_cfg.get("max_iterations", settings.agent_max_iterations),
@@ -1164,6 +1178,15 @@ async def _build_agent_runtime(
         thinking_enabled=preset_cfg.get("thinking_enabled", True),
         system_prompt=system_prompt,
         custom_instructions=custom_instructions,
+        timezone_name=timezone_name,
+        query_dedup_enabled=preset_cfg.get("query_dedup_enabled", True),
+        repeat_tool_reminder_enabled=preset_cfg.get(
+            "repeat_tool_reminder_enabled", True
+        ),
+        query_rewrite_max_attempts=preset_cfg.get("query_rewrite_max_attempts", 1),
+        context_pruning_enabled=preset_cfg.get("context_pruning_enabled", True),
+        retrieval_cache_enabled=preset_cfg.get("retrieval_cache_enabled", True),
+        reasoning_effort=(preset_cfg.get("reasoning_effort") or None),
     )
     # caller_ctx 交给引擎：执行工具时按需下传（仅外部 MCP 工具消费，用于把调用方身份
     # 透传给第三方 server；是否真的发出去由每个 MCP 配置的 forward_context 决定）。

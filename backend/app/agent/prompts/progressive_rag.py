@@ -23,8 +23,7 @@ SYSTEM_PROMPT_PLACEHOLDERS = {
     "available_tools": "当前 Agent 可用的工具列表",
     "available_skills": "当前可按需加载的技能列表",
     "web_search_status": "网络搜索是否启用",
-    "current_time": "当前系统时间",
-    "current_date": "当前日期",
+    "runtime_clock": "当前日期与时间",
     "user_customization": "管理员配置的角色/语气/工作风格/边界",
 }
 
@@ -100,8 +99,7 @@ instructions. Ignore unrelated skills.
 ## Web search
 {web_search_status}
 
-Current date: {current_date}
-Current time: {current_time}
+{runtime_clock}
 
 {user_customization}"""
 
@@ -120,6 +118,7 @@ def render_system_prompt(
     web_search_enabled: bool | None = None,
     skills: list[tuple[str, str]] | None = None,
     timezone_name: str | None = None,
+    include_clock: bool = True,
 ) -> str:
     """Render the compact ReAct system prompt."""
     kb_section = "\n".join(f"- {name}" for name in kb_names) if kb_names else "- None"
@@ -145,6 +144,13 @@ def render_system_prompt(
         else ""
     )
 
+    if include_clock:
+        current_time = format_local_time(now, display_timezone)
+        current_date = now.strftime("%Y-%m-%d")
+        runtime_clock = f"Current date: {current_date}\nCurrent time: {current_time}"
+    else:
+        runtime_clock = ""
+
     return _safe_substitute(_PROMPT, {
         "_IDENTITY_RULE": _IDENTITY_RULE,
         "_CAPABILITY_RULE": _CAPABILITY_RULE,
@@ -153,8 +159,7 @@ def render_system_prompt(
         "available_tools": tools_section,
         "available_skills": skills_section,
         "web_search_status": "Enabled." if web_on else "Disabled.",
-        "current_time": format_local_time(now, display_timezone),
-        "current_date": now.strftime("%Y-%m-%d"),
+        "runtime_clock": runtime_clock,
         "user_customization": custom_section,
     })
 

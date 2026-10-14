@@ -31,8 +31,29 @@ class AgentConfig:
     # 是否开启模型原生 thinking / reasoning 通道；不是 ThinkingTool。
     thinking_enabled: bool = True
 
+    # 可选的 provider 原生 reasoning effort；仅显式配置时透传，避免不支持该字段的端点拒绝请求。
+    reasoning_effort: str | None = None
+
     # 是否允许并行执行多个工具调用
     parallel_tool_calls: bool = False
+
+    # P0：完全相同工具调用达到阈值时向模型注入 advisory reminder。
+    repeat_tool_reminder_enabled: bool = True
+
+    # P0：检索工具内部规范化并去重 query。
+    query_dedup_enabled: bool = True
+
+    # P1：低质量检索最多允许一次由模型自行改写 query 的机会。
+    query_rewrite_max_attempts: int = 1
+
+    # P2：上下文压力出现时先裁剪旧工具结果，再决定是否触发 LLM 摘要。
+    context_pruning_enabled: bool = True
+    context_prune_threshold: float = 0.5
+    context_prune_head_chars: int = 4096
+    context_prune_tail_chars: int = 1024
+
+    # P3：agent 的确定性检索结果缓存；只在非 degraded、非空结果时写入。
+    retrieval_cache_enabled: bool = True
 
     # 最大上下文 token 数，超过阈值触发压缩
     max_context_tokens: int = 200000
@@ -57,6 +78,9 @@ class AgentConfig:
     # 完整系统提示词（运行时已渲染好的最终 prompt）。非空时引擎直接原样使用，
     # 不再叠加核心模板——chat 链路会把渲染结果回填到这里供引擎使用。
     system_prompt: str = ""
+
+    # P3：动态时钟不再写入稳定 system prompt，而是在当前用户轮末尾注入。
+    timezone_name: str | None = None
 
     # 用户自定义指令（角色设定 / 语气 / 工作流方法论 / 边界约束）。
     # chat 链路会渲染进 system_prompt；仅当 system_prompt 为空且引擎自行渲染
