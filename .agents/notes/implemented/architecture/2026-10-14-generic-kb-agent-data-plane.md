@@ -49,6 +49,12 @@ chunk, so repeated retrieval does not create duplicate evidence identities.
 `calculate` provides bounded Decimal arithmetic, percentage, min/max/sum, and
 explicit rounding without business formulas or semantic interpretation.
 
+Long document collection runs stream `tool_progress` events through the engine
+rather than blocking silently until the whole tool call returns. Per-document
+summary calls run with a bounded concurrency of six, explicitly disable model
+thinking, and use the same stable `cache_scope` across repeated core-summary
+tasks. Progress is metadata only and contains no document body.
+
 For collection-oriented requests, the system prompt directs the model to list
 documents before broad searches, use only returned doc_ids, never infer files
 from numbering, and report unread or unavailable documents. If retrieval has
@@ -84,6 +90,12 @@ rounding, percentages, and multi-step arithmetic are deterministic operations.
 A bounded calculator reduces reasoning length and avoids silently divergent
 results; choosing the inputs or business formula remains the caller's job.
 
+**Keep collect-all summarization as one blocking tool call.** Rejected because
+the user gets no actionable feedback for several minutes and one long call
+delays every later result in the iteration. Bounded per-document progress and
+per-tool result emission preserve the same map-reduce boundary without hiding
+execution progress.
+
 **Put document inventory in the business MCP server.** Rejected for the generic
 knowledge-base path. Artoo owns its KB and session-file inventory; business MCP
 servers may add their own domain inventory without changing Artoo.
@@ -110,6 +122,11 @@ adds model calls inside the tool, but those calls replace larger main-loop
 context growth and avoid repeated broad searches. Redis is an optional
 acceleration path, not a correctness dependency.
 
+The Open API gains an additive `tool_progress` event and
+`complete.first_answer_ms`; `complete.total_duration_ms` now reports real total
+elapsed time. Old clients can ignore progress events. Custom preset owners
+still control whether the summarize tool is visible.
+
 Open API request and SSE event structures are unchanged. The new tool results
 remain ordinary Agent tool observations with structured `ToolResult.data`.
 
@@ -122,6 +139,8 @@ fallback, deterministic Decimal calculation, cache-key invalidation, and
 per-document map-reduce summarization. The regression suite also verifies that
 legacy built-in preset rows are upgraded without discarding unrelated config
 keys, and that preloaded summary skills prefer the catalog and document tools.
+Summary tests assert that thinking is disabled for per-document model calls and
+that document progress is emitted before the final tool result.
 
 `backend/benchmarks/generic_kb_agent_ab.py` runs against local PostgreSQL KBs.
 On a 7-document local KB, search-only discovery used 4 search calls and 11

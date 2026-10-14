@@ -21,9 +21,9 @@ class SummaryCache:
         doc_id: str,
         version_hash: str,
         model_key: str,
-        instruction: str,
+        cache_scope: str,
     ) -> str:
-        raw = "\0".join([doc_id, version_hash, model_key, instruction])
+        raw = "\0".join([doc_id, version_hash, model_key, cache_scope])
         digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
         return f"{KEY_PREFIX}:{doc_id}:{digest}"
 

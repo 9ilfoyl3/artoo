@@ -450,6 +450,22 @@ function Chat() {
                     toolArgs: (step.arguments as Record<string, unknown>) || undefined,
                     success: undefined,
                   })
+                } else if (step.type === 'tool_progress') {
+                  const existing = segments.find(
+                    (seg) => seg.type === 'tool_call' && seg.toolCallId === step.tool_call_id
+                  )
+                  if (existing) {
+                    existing.progress = {
+                      phase: step.phase as 'start' | 'heartbeat' | 'document' | 'complete',
+                      completed: Number(step.completed || 0),
+                      total: Number(step.total || 0),
+                      filename: typeof step.filename === 'string' ? step.filename : undefined,
+                      success: typeof step.success === 'boolean' ? step.success : undefined,
+                      cache_hit: typeof step.cache_hit === 'boolean' ? step.cache_hit : undefined,
+                      elapsed_ms: typeof step.elapsed_ms === 'number' ? step.elapsed_ms : undefined,
+                      message: typeof step.message === 'string' ? step.message : undefined,
+                    }
+                  }
                 } else if (step.type === 'tool_result') {
                   // 更新匹配的 tool_call 段落
                   const existing = segments.find(
@@ -794,7 +810,38 @@ function Chat() {
                     break
                   }
 
-                  // 工具调用结果：更新匹配的 tool_call 段落
+                  // 长工具进度：只更新匹配的 tool_call 段落，不新增步骤行
+                  case 'tool_progress': {
+                    segments = segments.map((seg) =>
+                      seg.type === 'tool_call' && seg.toolCallId === parsed.tool_call_id
+                        ? {
+                            ...seg,
+                            progress: {
+                              phase: parsed.phase as 'start' | 'heartbeat' | 'document' | 'complete',
+                              completed: Number(parsed.completed || 0),
+                              total: Number(parsed.total || 0),
+                              filename: typeof parsed.filename === 'string' ? parsed.filename : undefined,
+                              success: typeof parsed.success === 'boolean' ? parsed.success : undefined,
+                              cache_hit: typeof parsed.cache_hit === 'boolean' ? parsed.cache_hit : undefined,
+                              elapsed_ms: typeof parsed.elapsed_ms === 'number' ? parsed.elapsed_ms : undefined,
+                              message: typeof parsed.message === 'string' ? parsed.message : undefined,
+                            },
+                          }
+                        : seg
+                    )
+                    updateStream((prev) => {
+                      const updated = [...prev]
+                      updated[updated.length - 1] = {
+                        role: 'assistant',
+                        content: fullContent,
+                        references,
+                        segments,
+                      }
+                      return updated
+                    })
+                    break
+                  }
+
                   case 'tool_result': {
                     segments = segments.map((seg) =>
                       seg.type === 'tool_call' && seg.toolCallId === parsed.tool_call_id

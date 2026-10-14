@@ -15,7 +15,7 @@ from app.agent.events import EventBus
 from app.agent.prompts.progressive_rag import render_system_prompt
 from app.agent.state import AgentState
 from app.agent.summary_cache import SummaryCache
-from app.agent.tools.base import BaseTool, ToolResult
+from app.agent.tools.base import BaseTool, ToolContext, ToolResult
 from app.agent.tools.calculator import CalculateTool
 from app.agent.tools.list_chunks import ListKnowledgeChunksTool, ReadDocumentTool
 from app.agent.tools.list_documents import ListKnowledgeDocumentsTool
@@ -34,11 +34,16 @@ async def _make_session_factory(tmp_path):
 
 
 class _FakeSummaryLLM:
-    def __init__(self):
+    def __init__(self, delay: float = 0.0):
         self.calls = 0
+        self.call_kwargs = []
+        self.delay = delay
 
     async def generate(self, messages, **kwargs):
         self.calls += 1
+        self.call_kwargs.append(kwargs)
+        if self.delay:
+            await asyncio.sleep(self.delay)
         return "faithful summary"
 
 
@@ -316,12 +321,12 @@ def test_deterministic_calculator_uses_decimal_and_rejects_unsafe_input():
     assert traversal.success is False
 
 
-def test_summary_cache_key_changes_with_document_version_or_instruction():
-    base = SummaryCache.build_key("doc-1", "v1", "model-a", "Summarize")
-    changed_version = SummaryCache.build_key("doc-1", "v2", "model-a", "Summarize")
-    changed_instruction = SummaryCache.build_key("doc-1", "v1", "model-a", "Extract risks")
+def test_summary_cache_key_changes_with_document_version_or_scope():
+    base = SummaryCache.build_key("doc-1", "v1", "model-a", "core-points")
+    changed_version = SummaryCache.build_key("doc-1", "v2", "model-a", "core-points")
+    changed_scope = SummaryCache.build_key("doc-1", "v1", "model-a", "meeting-actions")
 
-    assert len({base, changed_version, changed_instruction}) == 3
+    assert len({base, changed_version, changed_scope}) == 3
 
 
 def test_document_catalog_paginates_without_merging_unauthorized_kbs(tmp_path, monkeypatch):
@@ -545,24 +550,106 @@ def test_document_summarizer_maps_each_document_independently(tmp_path, monkeypa
             llm = _FakeSummaryLLM()
             state = AgentState()
             cache = _MemorySummaryCache()
+            progress_events = []
+
+            async def on_progress(payload):
+                progress_events.append(payload)
+
             tool = SummarizeDocumentsTool(llm=llm, state=state, cache=cache)
-            result = await tool.execute({
-                "doc_ids": ["doc-a", "doc-b"],
-                "instruction": "Summarize the core points.",
-            })
-            cached_result = await tool.execute({
-                "doc_ids": ["doc-a", "doc-b"],
-                "instruction": "Summarize the core points.",
-            })
+            result = await tool.execute(
+                {
+                    "doc_ids": ["doc-a", "doc-b"],
+                    "instruction": "Summarize the core points.",
+                    "cache_scope": "core-points",
+                },
+                ctx=ToolContext(progress=on_progress),
+            )
+            cached_result = await tool.execute(
+                {
+                    "doc_ids": ["doc-a", "doc-b"],
+                    "instruction": "Give me a faithful concise overview.",
+                    "cache_scope": "core-points",
+                },
+                ctx=ToolContext(progress=on_progress),
+            )
 
             assert result.success is True
             assert llm.calls == 2
+            assert all(call.get("enable_thinking") is False for call in llm.call_kwargs)
             assert cached_result.data["cache_hits"] == 2
             assert llm.calls == 2
             assert result.data["documents"][0]["chunk_count"] == 2
             assert "A child" not in result.output
             assert state.document_catalog["doc-a"]["fully_read"] is True
             assert state.document_catalog["doc-b"]["fully_read"] is True
+            assert progress_events[0]["phase"] == "start"
+            assert progress_events[0]["total"] == 2
+            assert progress_events[-1]["phase"] == "complete"
+            assert progress_events[-1]["completed"] == 2
+            assert any(
+                event["phase"] == "document" and event["cache_hit"] is True
+                for event in progress_events
+            )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(run())
+
+
+def test_document_summarizer_emits_heartbeat_during_slow_model_call(
+    tmp_path, monkeypatch
+):
+    import app.agent.tools.doc_files as doc_files_module
+    import app.agent.tools.summarize_documents as module
+
+    async def run():
+        engine, factory = await _make_session_factory(tmp_path)
+        try:
+            monkeypatch.setattr(module, "async_session", factory)
+            monkeypatch.setattr(doc_files_module, "async_session", factory)
+            monkeypatch.setattr(module, "_PROGRESS_HEARTBEAT_SECONDS", 0.01)
+            async with factory() as session:
+                session.add(KnowledgeBase(id="kb-a", name="A"))
+                session.add(
+                    Document(
+                        id="doc-a",
+                        kb_id="kb-a",
+                        filename="a.pdf",
+                        file_type="pdf",
+                        status="completed",
+                        chunk_count=1,
+                    )
+                )
+                session.add(
+                    Chunk(
+                        id="a-parent-1",
+                        doc_id="doc-a",
+                        kb_id="kb-a",
+                        parent_id=None,
+                        content="A one",
+                        chunk_index=0,
+                    )
+                )
+                await session.commit()
+
+            progress_events = []
+
+            async def on_progress(payload):
+                progress_events.append(payload)
+
+            tool = SummarizeDocumentsTool(
+                llm=_FakeSummaryLLM(delay=0.03),
+                cache=_MemorySummaryCache(),
+            )
+            result = await tool.execute(
+                {"doc_ids": ["doc-a"], "cache_scope": "core-points"},
+                ctx=ToolContext(progress=on_progress),
+            )
+
+            assert result.success is True
+            assert any(
+                event["phase"] == "heartbeat" for event in progress_events
+            )
         finally:
             await engine.dispose()
 

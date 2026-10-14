@@ -13,7 +13,7 @@ description: 文档深度分析技能。擅长对长文档进行结构化分析�
 
 ## 使用方法
 1. 整库或多文档分析先调用 `list_knowledge_documents`；主题定位再用 `knowledge_search`
-2. 多文档优先调用 `summarize_documents`；单文档用 `read_document` 读到 `fully_read=true`
+2. 多文档优先调用 `summarize_documents`，核心分析固定传 `cache_scope="core-points"`；单文档用 `read_document` 读到 `fully_read=true`
 3. 当前预设没有新工具时，才退化为 `knowledge_search` + `list_knowledge_chunks`
 4. 对完整内容进行结构化分析，并报告未覆盖文档
 5. 输出分析结果

@@ -37,7 +37,7 @@ import asyncio
 import logging
 import time
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -400,12 +400,20 @@ class MCPRemoteClient:
     def _caller_context(self, ctx: ToolContext | None) -> mcp_context.CallerContext | None:
         """把 Agent 层的 ToolContext 转为 MCP 线上格式；未开启透传时恒为 None。
 
-        转换只在这一处发生：Agent 层不认识 MCP 的线上结构，MCP 层不认识 Agent 的
-        工具上下文，二者字段同名，用 asdict 直转。
+        转换只在这一处发生，并显式列出允许过线的字段。调用期 progress 回调
+        属于本地 Agent 执行控制，不能进入第三方 MCP 载荷。
         """
         if not self._spec.forward_context or ctx is None:
             return None
-        caller = mcp_context.CallerContext(**asdict(ctx))
+        caller = mcp_context.CallerContext(
+            session_id=ctx.session_id,
+            tenant_id=ctx.tenant_id,
+            subject_type=ctx.subject_type,
+            subject_id=ctx.subject_id,
+            external_user_id=ctx.external_user_id,
+            api_key_id=ctx.api_key_id,
+            request_id=ctx.request_id,
+        )
         return None if caller.is_empty else caller
 
     def _caller_headers(self, ctx: ToolContext | None) -> dict[str, str]:

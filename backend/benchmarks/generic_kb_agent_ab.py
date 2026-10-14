@@ -148,6 +148,7 @@ async def _optimized_inventory_and_summary(kb_id: str) -> dict:
         summary_result = await summarizer.execute({
             "doc_ids": [doc["doc_id"] for doc in batch],
             "instruction": "Summarize core points for coverage benchmarking.",
+            "cache_scope": "core-points",
         })
         summary_success = summary_success and summary_result.success
         first_pass_cache_hits += summary_result.data.get("cache_hits", 0)
@@ -158,7 +159,8 @@ async def _optimized_inventory_and_summary(kb_id: str) -> dict:
         batch = documents[start:start + 20]
         summary_result = await summarizer.execute({
             "doc_ids": [doc["doc_id"] for doc in batch],
-            "instruction": "Summarize core points for coverage benchmarking.",
+            "instruction": "Return the same faithful core-point overview.",
+            "cache_scope": "core-points",
         })
         second_pass_cache_hits += summary_result.data.get("cache_hits", 0)
 

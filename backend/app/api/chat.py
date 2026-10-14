@@ -899,6 +899,7 @@ def _agent_event_to_sse(event: AgentEvent) -> dict | None:
     {"type": "reasoning_delta", "content": "...", "iteration": 0}
     {"type": "text_delta", "content": "...", "iteration": 0}
     {"type": "tool_call", "tool_name": "...", "tool_call_id": "...", "iteration": 0}
+    {"type": "tool_progress", "tool_call_id": "...", "completed": 4, "total": 20}
     {"type": "tool_result", "tool_call_id": "...", "tool_name": "...", "success": true, "duration_ms": 350}
     # MCP structuredContent 合法时额外带：
     {"type": "tool_result", ..., "structured_content": {"kind": "...", "data": {}}}
@@ -926,6 +927,26 @@ def _agent_event_to_sse(event: AgentEvent) -> dict | None:
             "arguments": event.data.get("arguments", {}),
             "iteration": event.data.get("iteration", 0),
         }
+    elif event.type == EventType.TOOL_PROGRESS:
+        data = {
+            "type": "tool_progress",
+            "tool_call_id": event.data.get("tool_call_id", ""),
+            "tool_name": event.data.get("tool_name", ""),
+            "iteration": event.data.get("iteration", 0),
+            "elapsed_ms": event.data.get("elapsed_ms", 0),
+        }
+        for key in (
+            "phase",
+            "completed",
+            "total",
+            "filename",
+            "success",
+            "cache_hit",
+            "message",
+        ):
+            if key in event.data:
+                data[key] = event.data[key]
+        return data
     elif event.type == EventType.TOOL_RESULT:
         sse_data = {
             "type": "tool_result",
@@ -1290,11 +1311,18 @@ async def _run_agent_nonstream(
         degraded = True
 
     total_steps = len(result_state.steps) if result_state else 0
-    duration_end = text_delta_at if text_delta_at is not None else time.time()
+    elapsed_end = time.time()
+    first_answer_ms = (
+        int((text_delta_at - agent_start_time) * 1000)
+        if text_delta_at is not None
+        else int((elapsed_end - agent_start_time) * 1000)
+    )
+    total_duration_ms = int((elapsed_end - agent_start_time) * 1000)
     steps_collected.append({
         "type": "complete",
         "total_steps": total_steps,
-        "total_duration_ms": int((duration_end - agent_start_time) * 1000),
+        "total_duration_ms": total_duration_ms,
+        "first_answer_ms": first_answer_ms,
     })
     return answer, state.knowledge_refs, degraded, steps_collected, list(state.failed_source_ids)
 
@@ -1505,15 +1533,20 @@ async def _stream_response(
             yield json.dumps(turn_end_event, ensure_ascii=False)
         full_response = full_response or ""
 
-        # 发射 complete 事件（携带整体耗时，供前端步骤统计展示）
-        # 耗时截止于首个 text_delta 事件（答案开始产出）；若全程无 text_delta
-        # （异常兜底等），退回到当前时刻，保证始终有合理值。
-        duration_end = text_delta_at if text_delta_at is not None else time.time()
-        total_duration_ms = int((duration_end - agent_start_time) * 1000)
+        # complete 携带真实请求总耗时；首答耗时单独保留，步骤面板可区分
+        # “开始返回答案”与“整个请求结束”。
+        elapsed_end = time.time()
+        total_duration_ms = int((elapsed_end - agent_start_time) * 1000)
+        first_answer_ms = (
+            int((text_delta_at - agent_start_time) * 1000)
+            if text_delta_at is not None
+            else total_duration_ms
+        )
         complete_event = {
             "type": "complete",
             "total_steps": len(result_state.steps) if result_state else 0,
             "total_duration_ms": total_duration_ms,
+            "first_answer_ms": first_answer_ms,
         }
         agent_steps_collected.append(complete_event)
         yield json.dumps(complete_event, ensure_ascii=False)

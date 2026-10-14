@@ -2,5 +2,5 @@
 # last confirmed-consistent state. Both languages carry equal authority; after
 # editing either side, bring the other along and re-record both hashes with:
 #   git hash-object .agents/notes/implemented/architecture/2026-10-14-generic-kb-agent-data-plane.md .agents/notes/implemented/architecture/2026-10-14-generic-kb-agent-data-plane.zh.md
-2026-10-14-generic-kb-agent-data-plane.md: f80f6c5dadb6579e256207cb983994b6e3c7d0cb
-2026-10-14-generic-kb-agent-data-plane.zh.md: d2e3cc3ee6fc3e5378394ef8b764c748674691ee
+2026-10-14-generic-kb-agent-data-plane.md: 8e179eb4b54f6026a7998ac1970793d7e4543c91
+2026-10-14-generic-kb-agent-data-plane.zh.md: 14107bbd0a8fa6e7c70aeb8c6260b5994a776792

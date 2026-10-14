@@ -12,7 +12,7 @@ import asyncio
 import json
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from app.agent.config import AgentConfig
 from app.agent.content_classifier import ChannelFragment, PlainContentClassifier
@@ -665,15 +665,17 @@ class AgentEngine:
                 },
             ))
 
-        if self._config.parallel_tool_calls and len(parsed) > 1:
-            outcomes = await asyncio.gather(*(
-                self._execute_single_tool(call, args) for call, args in parsed
-            ))
-        else:
-            outcomes = [await self._execute_single_tool(call, args) for call, args in parsed]
+        results: list[tuple[LLMToolCall, ToolResult, str | None] | None] = [
+            None for _ in parsed
+        ]
 
-        results: list[tuple[LLMToolCall, ToolResult, str | None]] = []
-        for (call, args), (result, duration_ms) in zip(parsed, outcomes):
+        async def record_outcome(
+            index: int,
+            call: LLMToolCall,
+            args: dict,
+            result: ToolResult,
+            duration_ms: int,
+        ) -> None:
             step.tool_calls.append(ToolCallRecord(
                 id=call.id,
                 name=call.function_name,
@@ -701,16 +703,70 @@ class AgentEngine:
                 if repeat_tracker is not None
                 else None
             )
-            results.append((call, result, reminder))
+            results[index] = (call, result, reminder)
 
-        return results
+        if self._config.parallel_tool_calls and len(parsed) > 1:
+            task_meta = {}
+            for index, (call, args) in enumerate(parsed):
+                task = asyncio.create_task(
+                    self._execute_single_tool(
+                        call,
+                        args,
+                        step=step,
+                        session_id=session_id,
+                    )
+                )
+                task_meta[task] = (index, call, args)
+            for task in asyncio.as_completed(task_meta):
+                result, duration_ms = await task
+                index, call, args = task_meta[task]
+                await record_outcome(index, call, args, result, duration_ms)
+        else:
+            for index, (call, args) in enumerate(parsed):
+                result, duration_ms = await self._execute_single_tool(
+                    call,
+                    args,
+                    step=step,
+                    session_id=session_id,
+                )
+                await record_outcome(index, call, args, result, duration_ms)
+
+        return [item for item in results if item is not None]
 
     async def _execute_single_tool(
-        self, call: LLMToolCall, args: dict
+        self,
+        call: LLMToolCall,
+        args: dict,
+        *,
+        step: AgentStep,
+        session_id: str,
     ) -> tuple[ToolResult, int]:
         started = time.time()
+
+        async def emit_progress(progress: dict) -> None:
+            await self._event_bus.emit(AgentEvent(
+                type=EventType.TOOL_PROGRESS,
+                session_id=session_id,
+                data={
+                    "tool_call_id": call.id,
+                    "tool_name": call.function_name,
+                    "iteration": step.iteration,
+                    "elapsed_ms": int((time.time() - started) * 1000),
+                    **progress,
+                },
+            ))
+
+        if self._tool_context is None:
+            tool_context = ToolContext(progress=emit_progress)
+        else:
+            tool_context = replace(self._tool_context, progress=emit_progress)
+
         try:
-            result = await self._tool_registry.execute(call.function_name, args, ctx=self._tool_context)
+            result = await self._tool_registry.execute(
+                call.function_name,
+                args,
+                ctx=tool_context,
+            )
         except Exception as exc:
             logger.exception("[Agent] tool %s failed", call.function_name)
             result = ToolResult(success=False, error=str(exc))

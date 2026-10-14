@@ -728,11 +728,12 @@ curl -N -X POST $BASE/v1/chat/completions \
 | --- | --- | --- |
 | `reasoning_delta` | `content`(str)、`iteration`(int) | 推理/思考增量。native thinking 模型来自 `reasoning_content` / `reasoning`；无独立思考通道的模型，tool-call 轮的普通 content 会由服务端归类为此事件 |
 | `tool_call` | `tool_name`(str)、`tool_call_id`(str)、`arguments`(object)、`iteration`(int) | 发起一次工具调用。同一 `iteration` 可并行发多条。`arguments` 为工具入参（如 `{"query":"保修期"}`） |
+| `tool_progress` | `tool_call_id`(str)、`tool_name`(str)、`iteration`(int)、`phase`(str)、`completed`(int)、`total`(int)、`filename`(str, optional)、`success`(bool, optional)、`cache_hit`(bool, optional)、`elapsed_ms`(int)、`message`(str, optional) | 长工具调用的有界进度，不新建步骤行。`phase` 为 `start` / `heartbeat` / `document` / `complete`。当前 `summarize_documents` 会按文档完成情况和最长 10 秒心跳发送；旧客户端可忽略 |
 | `tool_result` | `tool_call_id`(str)、`tool_name`(str)、`success`(bool)、`duration_ms`(int)、`files`(array)、`structured_content`(object, optional) | 工具执行结果。按 `tool_call_id` 回填到对应 `tool_call`。`files` 为本次工具读到的文件，每项 `{id, filename, source}`，`source`∈`document`(知识库文档) / `session-file`(会话临时文件)，可据此拼预览链接（见 4.9 / 8.4）。MCP 工具返回合法 `structuredContent` 时，额外透传 `{kind, data}`，供宿主按 `kind` 渲染；原始工具正文仍不外发 |
 | `text_delta` | `content`(str)、`iteration`(int) | 用户可见正文增量。正常情况来自自然停止的 assistant text；服务端兜底/合成答案也使用同一事件。不要把 answer 承载在 tool call 参数里 |
 | `token_usage` | `prompt_tokens`、`completion_tokens`、`total_tokens`、`max_context_tokens`、`current_context_tokens` | 上下文占用，可用于渲染「上下文已用 x/y」 |
 | `turn_end` | `finish_reason`(str) | Agent 本轮结束原因：`stop`、`max_iterations`、`length`、`error`、`empty` 等。`length` 表示正文可能被单次输出上限截断；`empty` 表示模型重试后仍没有返回内容 |
-| `complete` | `total_steps`(int)、`total_duration_ms`(int) | 执行步骤（思考+工具）结束。耗时**截止于首个 `text_delta`**，不含答案正文流式输出时间 |
+| `complete` | `total_steps`(int)、`total_duration_ms`(int)、`first_answer_ms`(int) | 请求结束汇总。`total_duration_ms` 是真实请求总耗时；`first_answer_ms` 是首个 `text_delta` 的时间，便于单独展示首答延迟 |
 | `error` | `content`(str) | 执行出错的可读原因（链路已尽力降级，通常仍会有兜底 `text_delta`） |
 | `message_saved` | `message_id`(str) | assistant 消息已落库的 DB 主键，用于后续消息反馈（7.7）与重试（7.8）定位。仅传了 `session_id` 且有正文时推送 |
 
@@ -742,11 +743,12 @@ curl -N -X POST $BASE/v1/chat/completions \
 {"type":"reasoning_delta","content":"需要先查","iteration":0}
 {"type":"reasoning_delta","content":"保修期条款","iteration":0}
 {"type":"tool_call","tool_name":"knowledge_search","tool_call_id":"call_1","arguments":{"query":"保修期"},"iteration":0}
+{"type":"tool_progress","tool_name":"summarize_documents","tool_call_id":"call_2","iteration":1,"phase":"document","completed":4,"total":20,"filename":"manual.pdf","elapsed_ms":1200}
 {"type":"tool_result","tool_call_id":"call_1","tool_name":"knowledge_search","success":true,"duration_ms":412,"files":[{"id":"doc-71bc...","filename":"manual.pdf","source":"document"}]}
 {"type":"text_delta","content":"根据资料，","iteration":1}
 {"type":"text_delta","content":"保修期为 12 个月。","iteration":1}
 {"type":"turn_end","finish_reason":"stop"}
-{"type":"complete","total_steps":2,"total_duration_ms":2110}
+{"type":"complete","total_steps":2,"total_duration_ms":2110,"first_answer_ms":1900}
 {"references":[...],"metadata":{"retrieval_mode":"agent","degraded":false}}
 {"type":"message_saved","message_id":"msg-..."}
 ```
@@ -773,13 +775,14 @@ curl -N -X POST $BASE/v1/chat/completions \
 
 1. `reasoning_delta`：与前一段合并——若上一段已是 `reasoning` 则把 `content` 追加进去，否则新建一段。
 2. `tool_call`：新建一段，记下 `tool_call_id`、`tool_name`、`arguments`。
-3. `tool_result`：**不新建段**，按 `tool_call_id` 找到对应 `tool_call` 段，回填 `success` / `duration_ms` / `files` / `structured_content`。宿主可按 `structured_content.kind` 选专属 renderer；未知 `kind` 必须回退到通用 JSON/工具卡。
-4. `text_delta`：与前一段合并（同规则 1，段类型为 `answer`）。
-5. `turn_end`：标记本轮结束；`finish_reason=length` 时提示正文可能被截断。
-6. `error`：不新建过程段；展示错误提示。若其后仍有 `text_delta`，继续按规则 4 归并。
-7. `complete`：取 `total_duration_ms` 挂到整条消息上做「共耗时 x 秒」展示。
-8. `token_usage`：更新上下文用量指示。
-9. 兜底：若归约完一段 `answer` 都没有，而消息 `content`（历史回放）非空，补一段 `answer`。
+3. `tool_progress`：**不新建段**，按 `tool_call_id` 更新对应 `tool_call` 段的临时进度。宿主可显示 `completed/total`、文件名、缓存命中和经过时间。
+4. `tool_result`：**不新建段**，按 `tool_call_id` 找到对应 `tool_call` 段，回填 `success` / `duration_ms` / `files` / `structured_content`。宿主可按 `structured_content.kind` 选专属 renderer；未知 `kind` 必须回退到通用 JSON/工具卡。
+5. `text_delta`：与前一段合并（同规则 1，段类型为 `answer`）。
+6. `turn_end`：标记本轮结束；`finish_reason=length` 时提示正文可能被截断。
+7. `error`：不新建过程段；展示错误提示。若其后仍有 `text_delta`，继续按规则 5 归并。
+8. `complete`：`total_duration_ms` 是真实总耗时，`first_answer_ms` 是首答延迟。宿主可分别展示“总耗时”和“首答耗时”。
+9. `token_usage`：更新上下文用量指示。
+10. 兜底：若归约完一段 `answer` 都没有，而消息 `content`（历史回放）非空，补一段 `answer`。
 
 > 只想要「纯答案 + 引用」的第三方可以忽略 `reasoning_delta` / `tool_call` / `tool_result`，只拼接 `text_delta.content` 并读末尾的 `references`，行为等价于普通流式问答。
 
@@ -1273,7 +1276,7 @@ curl $BASE/api/sessions/<session_id>/messages \
 | `feedback` | string/null | `like` / `dislike` / `null`，见 7.7 |
 | `created_at` | datetime | 创建时间 |
 
-**`agent_steps` 是复现步骤面板的关键**：流式过程中每一条 SSE 事件（`reasoning_delta` / `tool_call` / `tool_result` / `text_delta` / `token_usage` / `turn_end` / `complete` / `error`）都被原样按序追加进该数组随消息落库，字段结构与 6.3.1 完全一致。因此加载历史时把 `agent_steps` 按 6.3.2 的同一套归约规则重放，即可得到与实时流式**逐字一致**的思考/工具/正文分段展示，无需任何额外接口。
+**`agent_steps` 是复现步骤面板的关键**：流式过程中每一条 SSE 事件（`reasoning_delta` / `tool_call` / `tool_progress` / `tool_result` / `text_delta` / `token_usage` / `turn_end` / `complete` / `error`）都被原样按序追加进该数组随消息落库，字段结构与 6.3.1 完全一致。因此加载历史时把 `agent_steps` 按 6.3.2 的同一套归约规则重放，即可得到与实时流式**逐字一致**的思考/工具/正文分段展示，无需任何额外接口。
 
 ```json
 [

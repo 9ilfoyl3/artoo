@@ -887,6 +887,14 @@ export interface SessionMessageItem {
     success: any
     duration_ms: number | undefined
     structured_content?: StructuredToolContent
+    phase?: string
+    completed?: number
+    total?: number
+    filename?: string
+    cache_hit?: boolean
+    elapsed_ms?: number
+    message?: string
+    first_answer_ms?: number
     step: string
     detail: string
     max_context_tokens?: number

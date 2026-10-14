@@ -1,8 +1,11 @@
 """BaseTool 抽象接口、ToolResult 数据结构与 ToolContext 调用期上下文"""
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 from typing import Any
+
+ToolProgressCallback = Callable[[dict[str, Any]], Awaitable[None]]
 
 
 @dataclass
@@ -37,6 +40,11 @@ class ToolContext:
     external_user_id: str | None = None
     api_key_id: str | None = None
     request_id: str | None = None
+    # 工具内部长任务的可选进度回调。只存在于调用期上下文，不进入 MCP
+    # caller-context 线上载荷。工具应保持 payload 有界且不包含正文。
+    progress: ToolProgressCallback | None = field(
+        default=None, compare=False, repr=False
+    )
 
     @classmethod
     def from_identity(

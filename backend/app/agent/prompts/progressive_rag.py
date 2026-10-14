@@ -173,6 +173,8 @@ def render_system_prompt(
             "documents, call `list_knowledge_documents` before broad searches.\n"
             "- Use only doc_ids returned by the catalog. Never infer missing files "
             "from filename numbering or from search misses.\n"
+            "- For repeatable summary tasks, set `cache_scope` to a stable short "
+            "label such as `core-points` and reuse the exact same value across runs.\n"
             f"{summarize_step}"
             "- Report unread, unavailable, or out-of-scope documents explicitly.\n"
         )

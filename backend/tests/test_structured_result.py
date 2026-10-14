@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 import pytest
 
@@ -97,6 +98,48 @@ class _FeedbackAwareLLM:
                 "recoverable_feedback",
                 "{}",
             )],
+            finish_reason="tool_calls",
+        )
+
+
+class _TimedTool(BaseTool):
+    def __init__(self, name: str, delay: float) -> None:
+        self._name = name
+        self._delay = delay
+        self.started_at: float | None = None
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def description(self) -> str:
+        return "timed test tool"
+
+    @property
+    def parameters(self) -> dict:
+        return {"type": "object", "properties": {}}
+
+    async def execute(self, args: dict) -> ToolResult:
+        self.started_at = time.perf_counter()
+        await asyncio.sleep(self._delay)
+        return ToolResult(success=True, output=self._name)
+
+
+class _TwoToolLLM:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def stream_with_tools(self, messages, tools, **kwargs):
+        self.calls += 1
+        if any(message.get("role") == "tool" for message in messages):
+            yield StreamChunk(content="finished", finish_reason="stop")
+            return
+        yield StreamChunk(
+            tool_calls=[
+                LLMToolCall("slow-call", "slow_tool", "{}"),
+                LLMToolCall("fast-call", "fast_tool", "{}"),
+            ],
             finish_reason="tool_calls",
         )
 
@@ -297,3 +340,60 @@ def test_non_recoverable_feedback_marks_retry_forbidden():
 
     assert "recoverable=false" in notice
     assert "retry_policy=do_not_retry" in notice
+
+
+def test_sequential_tool_result_is_emitted_before_next_tool_starts():
+    slow = _TimedTool("slow_tool", 0.05)
+    fast = _TimedTool("fast_tool", 0.01)
+    registry = ToolRegistry()
+    registry.register(slow)
+    registry.register(fast)
+    bus = EventBus()
+    result_times = {}
+
+    async def collect(event):
+        if event.type == EventType.TOOL_RESULT:
+            result_times[event.data["tool_name"]] = time.perf_counter()
+
+    bus.on(EventType.TOOL_RESULT, collect)
+    engine = AgentEngine(
+        AgentConfig(
+            system_prompt="stable",
+            max_iterations=2,
+            parallel_tool_calls=False,
+        ),
+        _TwoToolLLM(),
+        registry,
+        bus,
+    )
+
+    state = asyncio.run(engine.execute("session", "run tools"))
+
+    assert state.final_answer == "finished"
+    assert fast.started_at is not None
+    assert result_times["slow_tool"] < fast.started_at
+
+
+def test_tool_progress_serializes_as_a_separate_sse_event():
+    event = AgentEvent(
+        EventType.TOOL_PROGRESS,
+        "session",
+        {
+            "tool_call_id": "call-1",
+            "tool_name": "summarize_documents",
+            "iteration": 1,
+            "phase": "document",
+            "completed": 4,
+            "total": 20,
+            "filename": "a.pdf",
+            "cache_hit": False,
+            "elapsed_ms": 1200,
+        },
+    )
+
+    payload = _agent_event_to_sse(event)
+
+    assert payload["type"] == "tool_progress"
+    assert payload["completed"] == 4
+    assert payload["total"] == 20
+    assert payload["filename"] == "a.pdf"

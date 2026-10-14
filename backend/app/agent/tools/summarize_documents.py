@@ -12,7 +12,7 @@ from sqlalchemy import select
 from app.agent.state import AgentState
 from app.agent.evidence import register_chunk_evidence
 from app.agent.summary_cache import SummaryCache, get_summary_cache
-from app.agent.tools.base import BaseTool, ToolResult
+from app.agent.tools.base import BaseTool, ToolContext, ToolResult
 from app.agent.tools.doc_files import resolve_doc_files
 from app.models.provider import LLMProvider
 from app.schema.db import Chunk, SessionChunk
@@ -21,8 +21,9 @@ from app.storage.database import async_session
 logger = logging.getLogger(__name__)
 
 _MAX_DOCUMENTS = 20
-_MAX_CONCURRENCY = 3
+_MAX_CONCURRENCY = 6
 _MAP_BATCH_CHARS = 24_000
+_PROGRESS_HEARTBEAT_SECONDS = 10
 
 
 class SummarizeDocumentsTool(BaseTool):
@@ -32,6 +33,8 @@ class SummarizeDocumentsTool(BaseTool):
     stable doc_ids; this implementation only reads, chunks, summarizes, and
     returns evidence-level document metadata.
     """
+
+    accepts_context = True
 
     def __init__(
         self,
@@ -56,7 +59,8 @@ class SummarizeDocumentsTool(BaseTool):
             "processed independently with its own context, then oversized documents "
             "are reduced hierarchically. Use after list_knowledge_documents for "
             "collection tasks. Returns per-document summaries and coverage status; "
-            "it does not interpret business-specific rules."
+            "it does not interpret business-specific rules. Reuse the same "
+            "cache_scope for repeated tasks of the same type."
         )
 
     @property
@@ -78,11 +82,23 @@ class SummarizeDocumentsTool(BaseTool):
                         "core-point summary from the supplied text only."
                     ),
                 },
+                "cache_scope": {
+                    "type": "string",
+                    "description": (
+                        "Stable short label for repeated tasks, for example "
+                        "core-points or meeting-actions. Reuse the exact value across "
+                        "runs; omit only for one-off extraction instructions."
+                    ),
+                },
             },
             "required": ["doc_ids"],
         }
 
-    async def execute(self, args: dict) -> ToolResult:
+    async def execute(
+        self,
+        args: dict,
+        ctx: ToolContext | None = None,
+    ) -> ToolResult:
         raw_doc_ids = args.get("doc_ids")
         if not isinstance(raw_doc_ids, list):
             return ToolResult(success=False, error="doc_ids must be a non-empty array")
@@ -102,6 +118,7 @@ class SummarizeDocumentsTool(BaseTool):
             args.get("instruction")
             or "Summarize the core points faithfully using only the supplied document."
         ).strip()
+        cache_scope = str(args.get("cache_scope") or "").strip()[:200]
 
         resolved = await resolve_doc_files(doc_ids)
         semaphore = asyncio.Semaphore(_MAX_CONCURRENCY)
@@ -122,9 +139,81 @@ class SummarizeDocumentsTool(BaseTool):
                     instruction,
                     cache=cache,
                     model_key=str(model_key),
+                    cache_scope=cache_scope,
                 )
 
-        summaries = await asyncio.gather(*(summarize_one(doc_id) for doc_id in doc_ids))
+        async def emit_progress(payload: dict) -> None:
+            if ctx is None or ctx.progress is None:
+                return
+            try:
+                await ctx.progress(payload)
+            except Exception as exc:  # noqa: BLE001 - progress must never fail the tool
+                logger.warning("[SummarizeDocuments] progress emit failed: %s", exc)
+
+        total = len(doc_ids)
+        progress_state = {"completed": 0}
+        heartbeat_stop = asyncio.Event()
+
+        async def progress_heartbeat() -> None:
+            while True:
+                try:
+                    await asyncio.wait_for(
+                        heartbeat_stop.wait(),
+                        timeout=_PROGRESS_HEARTBEAT_SECONDS,
+                    )
+                    return
+                except asyncio.TimeoutError:
+                    await emit_progress({
+                        "phase": "heartbeat",
+                        "completed": progress_state["completed"],
+                        "total": total,
+                        "message": (
+                            f"摘要处理中：已完成 {progress_state['completed']}/"
+                            f"{total} 份文档"
+                        ),
+                    })
+
+        heartbeat_task = asyncio.create_task(progress_heartbeat())
+        await emit_progress({
+            "phase": "start",
+            "completed": 0,
+            "total": total,
+        })
+        tasks = {
+            asyncio.create_task(summarize_one(doc_id)): doc_id
+            for doc_id in doc_ids
+        }
+        summaries_by_doc: dict[str, dict] = {}
+        completed = 0
+        try:
+            for task in asyncio.as_completed(tasks):
+                summary = await task
+                summaries_by_doc[summary["doc_id"]] = summary
+                completed += 1
+                progress_state["completed"] = completed
+                if self._should_emit_progress(completed, total):
+                    await emit_progress({
+                        "phase": "document",
+                        "completed": completed,
+                        "total": total,
+                        "filename": summary.get("filename"),
+                        "success": summary.get("success"),
+                        "cache_hit": summary.get("cache_hit"),
+                    })
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            heartbeat_stop.set()
+            await heartbeat_task
+        summaries = [summaries_by_doc[doc_id] for doc_id in doc_ids]
+        await emit_progress({
+            "phase": "complete",
+            "completed": total,
+            "total": total,
+            "success": any(summary["success"] for summary in summaries),
+        })
 
         if self._state is not None:
             for summary in summaries:
@@ -188,6 +277,7 @@ class SummarizeDocumentsTool(BaseTool):
         *,
         cache: SummaryCache | None,
         model_key: str,
+        cache_scope: str,
     ) -> dict:
         try:
             chunks, version_hash = await self._load_parent_chunks(doc_id)
@@ -206,7 +296,7 @@ class SummarizeDocumentsTool(BaseTool):
                     doc_id,
                     version_hash,
                     model_key,
-                    instruction,
+                    cache_scope or instruction,
                 )
                 if cache is not None
                 else ""
@@ -341,7 +431,20 @@ class SummarizeDocumentsTool(BaseTool):
                 ),
             },
         ]
-        summary = await self._llm.generate(messages, temperature=0.2, max_tokens=1200)
+        summary = await self._llm.generate(
+            messages,
+            temperature=0.2,
+            max_tokens=1200,
+            enable_thinking=False,
+        )
         if not summary or not summary.strip():
             raise RuntimeError("Summary model returned empty content")
         return summary
+
+    @staticmethod
+    def _should_emit_progress(completed: int, total: int) -> bool:
+        """Bound progress events while keeping the first completions visible."""
+        if completed <= min(3, total) or completed == total:
+            return True
+        step = max(1, (total + 9) // 10)
+        return completed % step == 0
