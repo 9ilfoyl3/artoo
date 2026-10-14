@@ -356,6 +356,7 @@ class AgentPreset(Base):
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     description: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     config_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    # 平台唯一默认；仅超级管理员可切换。删除默认项时回落到内置智能推理。
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
     # 所属租户；内置预设为 None（跨租户可见）
     tenant_id: Mapped[Optional[str]] = mapped_column(String, index=True, nullable=True)

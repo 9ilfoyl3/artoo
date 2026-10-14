@@ -11,8 +11,9 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import require_member
+from app.api.deps import require_member, require_platform
 from app.auth.identity import IdentityContext
 from app.schema.db import AgentPreset
 from app.storage.database import async_session
@@ -29,6 +30,7 @@ class AgentPresetCreate(BaseModel):
     name: str = Field(..., max_length=100)
     description: str | None = Field(None, max_length=500)
     config_json: dict = Field(default_factory=dict)
+    # 平台唯一默认；仅超级管理员可置 True，普通成员写入会被拒绝。
     is_default: bool = False
     # 是否开放给本租户全体成员可见可用（默认私有，仅创建者可见）
     is_shared: bool = False
@@ -39,6 +41,7 @@ class AgentPresetUpdate(BaseModel):
     name: str | None = Field(None, max_length=100)
     description: str | None = Field(None, max_length=500)
     config_json: dict | None = None
+    # 平台唯一默认；仅超级管理员可修改。
     is_default: bool | None = None
     # 开放/收回开关（None 表示不变更）
     is_shared: bool | None = None
@@ -255,8 +258,26 @@ def _is_visible(preset: AgentPreset, identity: IdentityContext) -> bool:
     return bool(preset.is_shared)
 
 
+async def _promote_global_default(session: AsyncSession, preset: AgentPreset) -> None:
+    """将 ``preset`` 设为唯一全局默认预设。"""
+    result = await session.execute(
+        select(AgentPreset).where(
+            AgentPreset.is_default == True,  # noqa: E712
+            AgentPreset.id != preset.id,
+        )
+    )
+    for other in result.scalars().all():
+        other.is_default = False
+    preset.is_default = True
+
+
 async def _ensure_builtin_presets() -> None:
-    """确保内置预设存在（不存在时自动创建；已存在则校正其内置归属字段）。"""
+    """确保内置预设存在，并维持恰好一个全局默认预设。
+
+    已存在则校正内置归属字段。历史数据可能因旧的“每人一个默认”语义存在零个或
+    多个默认项，这里统一收敛为一项：优先保留内置“智能推理”，否则保留最早创建的
+    默认项；没有任何默认项时回落到内置“智能推理”。
+    """
     async with async_session() as session:
         for preset_data in _BUILTIN_PRESETS:
             result = await session.execute(
@@ -272,6 +293,26 @@ async def _ensure_builtin_presets() -> None:
                 existing.tenant_id = None
                 existing.owner_user_id = None
                 existing.is_shared = True
+
+        await session.flush()
+        result = await session.execute(
+            select(AgentPreset).where(AgentPreset.is_default == True)  # noqa: E712
+        )
+        defaults = list(result.scalars().all())
+        if not defaults:
+            fallback = await session.get(AgentPreset, "preset-smart-reasoning")
+            if fallback is not None:
+                fallback.is_default = True
+        elif len(defaults) > 1:
+            defaults.sort(
+                key=lambda preset: (
+                    preset.id != "preset-smart-reasoning",
+                    preset.created_at.isoformat() if preset.created_at else "",
+                    preset.id,
+                )
+            )
+            for duplicate in defaults[1:]:
+                duplicate.is_default = False
         await session.commit()
 
 
@@ -477,6 +518,29 @@ async def list_presets(
     ]
 
 
+@router.put("/{preset_id}/default", response_model=AgentPresetResponse)
+async def set_default_preset(
+    preset_id: str,
+    identity: IdentityContext = Depends(require_platform()),
+):
+    """将平台内置或超管创建的平台级预设设为全局默认（仅超级管理员）。"""
+    await _ensure_builtin_presets()
+
+    async with async_session() as session:
+        result = await session.execute(
+            select(AgentPreset).where(AgentPreset.id == preset_id)
+        )
+        preset = result.scalar_one_or_none()
+        if preset is None or not _is_visible(preset, identity):
+            raise HTTPException(status_code=404, detail="预设不存在")
+
+        await _promote_global_default(session, preset)
+        await session.commit()
+        await session.refresh(preset)
+
+    return _to_response(preset, identity)
+
+
 @router.post("", response_model=AgentPresetResponse)
 async def create_preset(
     data: AgentPresetCreate,
@@ -486,6 +550,9 @@ async def create_preset(
 
     归属盖章：tenant_id=当前租户、owner_user_id=行事主体。可选 is_shared 开放给本租户。
     """
+    if data.is_default and not identity.is_super_admin:
+        raise HTTPException(status_code=403, detail="仅平台超级管理员可以设置全局默认智能体")
+
     preset = AgentPreset(
         id=str(uuid.uuid4()),
         name=data.name,
@@ -498,16 +565,8 @@ async def create_preset(
     )
 
     async with async_session() as session:
-        # 如果设为默认，取消本人其他默认（默认归属于创建者自身，不影响他人）
         if data.is_default:
-            result = await session.execute(
-                select(AgentPreset).where(
-                    AgentPreset.is_default == True,  # noqa: E712
-                    AgentPreset.owner_user_id == identity.acting_subject_id,
-                )
-            )
-            for existing in result.scalars().all():
-                existing.is_default = False
+            await _promote_global_default(session, preset)
 
         session.add(preset)
         await session.commit()
@@ -540,11 +599,17 @@ async def update_preset(
     identity: IdentityContext = Depends(require_member()),
 ):
     """更新 Agent 预设（仅创建者本人；内置预设不可改）。"""
+    if data.is_default is not None and not identity.is_super_admin:
+        raise HTTPException(status_code=403, detail="仅平台超级管理员可以设置全局默认智能体")
+    if data.is_default is False:
+        await _ensure_builtin_presets()
+
     async with async_session() as session:
         result = await session.execute(
             select(AgentPreset).where(AgentPreset.id == preset_id)
         )
         preset = _ensure_owner_or_404(result.scalar_one_or_none(), identity)
+        was_default = preset.is_default
 
         if data.name is not None:
             preset.name = data.name
@@ -556,17 +621,13 @@ async def update_preset(
             preset.is_shared = data.is_shared
         if data.is_default is not None:
             if data.is_default:
-                # 取消本人其他默认（默认归属于创建者自身）
-                others = await session.execute(
-                    select(AgentPreset).where(
-                        AgentPreset.is_default == True,  # noqa: E712
-                        AgentPreset.id != preset_id,
-                        AgentPreset.owner_user_id == identity.acting_subject_id,
-                    )
-                )
-                for other in others.scalars().all():
-                    other.is_default = False
-            preset.is_default = data.is_default
+                await _promote_global_default(session, preset)
+            else:
+                preset.is_default = False
+                if was_default:
+                    fallback = await session.get(AgentPreset, "preset-smart-reasoning")
+                    if fallback is not None:
+                        await _promote_global_default(session, fallback)
 
         await session.commit()
         await session.refresh(preset)
@@ -580,11 +641,18 @@ async def delete_preset(
     identity: IdentityContext = Depends(require_member()),
 ):
     """删除 Agent 预设（仅创建者本人；内置预设不可删）。"""
+    await _ensure_builtin_presets()
+
     async with async_session() as session:
         result = await session.execute(
             select(AgentPreset).where(AgentPreset.id == preset_id)
         )
         preset = _ensure_owner_or_404(result.scalar_one_or_none(), identity)
+
+        if preset.is_default:
+            fallback = await session.get(AgentPreset, "preset-smart-reasoning")
+            if fallback is not None:
+                await _promote_global_default(session, fallback)
 
         await session.delete(preset)
         await session.commit()

@@ -9,6 +9,7 @@
 #   deploy/build.sh --arch arm64     # 指定目标架构（amd64 | arm64）
 #   deploy/build.sh --app-only       # 只打应用镜像（迭代更新，不含中间件）
 #   deploy/build.sh --with-graph     # 额外安装知识图谱依赖（Neo4j 驱动）并导出 Neo4j 镜像
+#   deploy/build.sh --out <目录>     # 指定输出目录（默认 dist），双架构交付时各建一个目录
 # ============================================================
 set -euo pipefail
 
@@ -17,24 +18,42 @@ cd "$(dirname "$0")/.."   # 切到项目根目录
 ARCH=""           # 留空 = 跟随本机架构
 APP_ONLY=false
 WITH_GRAPH=false  # 是否在后端镜像内安装知识图谱依赖（Neo4j 驱动）。--with-graph 可开启
+OUT="dist"        # 输出目录，可用 --out 覆盖（如 --out dist/artoo-deploy-amd64）
+# 中间件镜像拉取代理（可选）。Docker Hub 直连受限的网络环境可设置，
+# 如：ARTOO_PULL_MIRROR=docker.m.daocloud.io（支持 docker.io 与 quay.io 路径代理）。
+PULL_MIRROR="${ARTOO_PULL_MIRROR:-}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --arch) ARCH="$2"; shift 2 ;;
     --app-only) APP_ONLY=true; shift ;;
     --with-graph) WITH_GRAPH=true; shift ;;
+    --out) OUT="$2"; shift 2 ;;
     *) echo "未知参数: $1"; exit 1 ;;
   esac
 done
+
+[[ -n "$OUT" ]] || { echo "错误: --out 不能为空"; exit 1; }
+mkdir -p "$OUT"
 
 PLATFORM_ARG=""
 SAVE_PLATFORM_ARG=""   # 跨架构 save 必须指定平台，否则 containerd 存储会找不到其它架构 manifest 而报错
 [[ -n "$ARCH" ]] && PLATFORM_ARG="--platform linux/${ARCH}" && SAVE_PLATFORM_ARG="--platform linux/${ARCH}"
 
-OUT="dist"
-mkdir -p "$OUT"
-
 echo "=== Artoo 离线包构建 (${ARCH:-本机架构}) ==="
+
+# 经代理拉取后重打标准 tag，后续 docker save 仍按原始镜像名导出。
+pull_image() {
+  local img="$1"
+  if [[ -n "$PULL_MIRROR" ]]; then
+    if docker pull $PLATFORM_ARG "$PULL_MIRROR/$img"; then
+      docker tag "$PULL_MIRROR/$img" "$img"
+      return 0
+    fi
+    echo "  镜像源拉取失败(${PULL_MIRROR}/${img}), 回退直连..."
+  fi
+  docker pull $PLATFORM_ARG "$img"
+}
 
 echo "[1/4] 构建应用镜像..."
 GRAPH_BUILD_ARG=""
@@ -68,7 +87,7 @@ if [[ "$APP_ONLY" == false ]]; then
         docker rmi "$img" >/dev/null 2>&1 || true
       fi
     fi
-    docker pull $PLATFORM_ARG "$img"
+    pull_image "$img"
   done
   docker save $SAVE_PLATFORM_ARG "${INFRA_IMAGES[@]}" -o "$OUT/infra-images.tar"
 else
@@ -82,6 +101,8 @@ mkdir -p "$OUT/deploy"
 cp deploy/milvus-user.yaml "$OUT/deploy/"
 cp deploy/install.sh "$OUT/"
 chmod +x "$OUT/install.sh"
+# 首次部署 / 更新部署交付手册：随包交付，实施人员按场景直接照做。
+cp deploy/DELIVERY.md "$OUT/"
 # Milvus 拓扑切换用的数据清除脚本：必须随包交付，否则运维在服务器上无脚本可执行。
 # 放在 deploy/ 下（脚本自身会向上一级找 docker-compose.yml，两种布局都兼容）。
 cp deploy/reset-knowledge-data.sh "$OUT/deploy/"
@@ -94,7 +115,14 @@ cp deploy/DEPLOY.md "$OUT/"
 mkdir -p "$OUT/frontend/public"
 cp frontend/public/config.js "$OUT/frontend/public/config.js"
 
+echo "[5/5] 生成镜像校验和..."
+if command -v sha256sum >/dev/null 2>&1; then
+  (cd "$OUT" && sha256sum ./*.tar > SHA256SUMS)
+else
+  (cd "$OUT" && shasum -a 256 ./*.tar > SHA256SUMS)
+fi
+
 echo ""
 echo "=== 完成 ==="
 du -sh "$OUT"
-echo "将 $OUT/ 整体拷到服务器，执行 ./install.sh"
+echo "将 $OUT/ 整体拷到服务器（校验 SHA256SUMS 后），执行 ./install.sh"
