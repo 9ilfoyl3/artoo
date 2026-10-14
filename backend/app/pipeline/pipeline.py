@@ -31,7 +31,11 @@ from app.pipeline.chunker_router import ChunkerFactory, ChunkerRouter
 import app.pipeline.chunkers  # noqa: F401 — 确保所有 Chunker 注册到 Factory
 from app.pipeline.embedder import PipelineEmbedder
 from app.pipeline.enricher import Enricher
-from app.pipeline.cleaner import TextCleaner, strip_data_uris
+from app.pipeline.cleaner import (
+    TextCleaner,
+    looks_like_fragmented_alnum_text,
+    strip_data_uris,
+)
 from app.pipeline.loader import EmbeddedImage, LoadResult, get_loader
 from app.pipeline.logging import PipelineLogger
 from app.pipeline.context_embedder import ContextualEmbedder
@@ -50,6 +54,16 @@ if TYPE_CHECKING:
     from app.session_upload.limits import UploadLimits
 
 logger = logging.getLogger(__name__)
+
+
+def _has_low_quality_hybrid_text_layer(load_result: LoadResult) -> bool:
+    """整页扫描图附带的隐藏文本层是否明显碎化，应优先重跑 OCR。"""
+    content = load_result.content.strip()
+    return (
+        bool(content)
+        and any(image.is_page_background for image in load_result.images)
+        and looks_like_fragmented_alnum_text(content)
+    )
 
 
 class CancelledError(Exception):
@@ -227,24 +241,49 @@ class DocumentPipeline:
 
             # ─── 2. OCR（与 process() 等价，但不更新 ProgressTracker / 不查 Document） ───
             stripped_content = load_result.content.strip()
+            low_quality_hybrid_text = _has_low_quality_hybrid_text_layer(load_result)
             needs_ocr = (
                 not is_audio
-                and (not stripped_content or len(stripped_content) < 10)
                 and self.ocr_manager
+                and (
+                    not stripped_content
+                    or len(stripped_content) < 10
+                    or low_quality_hybrid_text
+                )
             )
             if needs_ocr:
+                if low_quality_hybrid_text:
+                    logger.info(
+                        "[%s=%s] 检测到低质量隐藏文本层，改走 OCR",
+                        source_kind,
+                        source_id,
+                    )
                 # recognize_document 按 Provider 能力准备输入：接受 PDF 的服务整文件直送，
                 # 只接受图片的服务（如 PaddleOCR）由其内部按页渲染整页图片后逐页识别。
                 # pipeline 不感知能力细节，也不再靠"返回空再回落"在运行时试探。
                 ocr_result = await self.ocr_manager.recognize_document(file_path)
-                load_result = LoadResult(
-                    content=ocr_result.full_text,
-                    metadata={
-                        **load_result.metadata,
-                        "ocr_provider": ocr_result.provider_name,
-                    },
-                    images=[],
-                )
+                ocr_text = ocr_result.full_text.strip()
+                if ocr_text:
+                    load_result = LoadResult(
+                        content=ocr_result.full_text,
+                        metadata={
+                            **load_result.metadata,
+                            "ocr_provider": ocr_result.provider_name,
+                        },
+                        images=[],
+                    )
+                elif stripped_content:
+                    logger.warning(
+                        "[%s=%s] OCR 未识别出文本，回退 PDF 文本层",
+                        source_kind,
+                        source_id,
+                    )
+                else:
+                    from app.api.errors import EmptyDocumentContentError
+
+                    raise EmptyDocumentContentError(
+                        "文档提取文本为空，且 OCR 未识别出内容"
+                    )
             elif not is_audio and (not stripped_content or len(stripped_content) < 10):
                 if not self.ocr_manager:
                     # 无可提取文本且未配置 OCR：业务输入问题而非服务端故障。
@@ -284,14 +323,17 @@ class DocumentPipeline:
             if enable_cleaner:
                 cleaner = TextCleaner()
                 use_page_blocks = load_result.page_blocks if load_result.page_blocks else None
+                use_page_heights = load_result.page_heights if load_result.page_heights else None
                 if final_content != load_result.content:
                     # 嵌入图片 OCR 已合并，page_blocks 不再准确（不含图片 OCR 文本）。
                     use_page_blocks = None
+                    use_page_heights = None
                 final_content = await asyncio.to_thread(
                     cleaner.clean,
                     content=final_content,
                     page_texts=load_result.page_texts if load_result.page_texts else None,
                     page_blocks=use_page_blocks,
+                    page_heights=use_page_heights,
                 )
 
             # 清洗后兜底 OCR：与 process() 一致（音频转写结果不触发 OCR 兜底）
@@ -303,15 +345,23 @@ class DocumentPipeline:
                 and not is_audio
             ):
                 ocr_result = await self.ocr_manager.recognize_document(file_path)
-                final_content = ocr_result.full_text
-                load_result = LoadResult(
-                    content=final_content,
-                    metadata={
-                        **load_result.metadata,
-                        "ocr_provider": ocr_result.provider_name,
-                    },
-                    images=[],
-                )
+                ocr_text = ocr_result.full_text.strip()
+                if ocr_text:
+                    final_content = ocr_result.full_text
+                    load_result = LoadResult(
+                        content=final_content,
+                        metadata={
+                            **load_result.metadata,
+                            "ocr_provider": ocr_result.provider_name,
+                        },
+                        images=[],
+                    )
+                else:
+                    logger.warning(
+                        "[%s=%s] OCR 未识别出文本，保留清洗后文本",
+                        source_kind,
+                        source_id,
+                    )
 
             # ─── 2.6 剥离内嵌 base64 图片 ───
             # 放在所有 OCR 分支（主路径 / 嵌入图片 / 兜底）收敛之后、空内容校验之前，

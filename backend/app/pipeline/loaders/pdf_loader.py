@@ -64,6 +64,7 @@ class PdfLoader(BaseLoader):
 
         pages_text: list[str] = []
         page_blocks: list[list[dict]] = []
+        page_heights: list[float] = []
         images: list[EmbeddedImage] = []
         seen_hashes: set[str] = set()  # 用于去重
         total_images_extracted = 0
@@ -76,6 +77,7 @@ class PdfLoader(BaseLoader):
             # 使用 get_text("dict") 获取带 bbox 的文本块，供 TextCleaner 去噪使用
             blocks = self._extract_page_blocks(page)
             page_blocks.append(blocks)
+            page_heights.append(float(page.rect.height))
             has_usable_text_layer = self._has_usable_text_layer(page, blocks)
 
             # 达到图片上限后不再提取
@@ -114,6 +116,7 @@ class PdfLoader(BaseLoader):
             images=images,
             page_texts=pages_text,
             page_blocks=page_blocks,
+            page_heights=page_heights,
         )
 
     @staticmethod

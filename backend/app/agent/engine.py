@@ -45,6 +45,8 @@ _TRANSIENT_HTTP_CODES = {429, 500, 502, 503, 504}
 _STUCK_LOOP_THRESHOLD = 3
 _KB_TOOL_NAMES = {"knowledge_search", "grep_chunks", "search_knowledge_base"}
 _KB_REDACTION_MARKER = "[Previous retrieval omitted — perform a fresh search.]"
+_TURN_CONTRACT_OPEN = "<response_contract>"
+_TURN_CONTRACT_CLOSE = "</response_contract>"
 
 
 def _redact_history_kb_results(messages: list[dict]) -> list[dict]:
@@ -190,6 +192,7 @@ class AgentEngine:
             self._config.consolidation_threshold,
         )
         self._last_query = ""
+        self._language_directive = ""
 
     async def execute(
         self,
@@ -217,18 +220,25 @@ class AgentEngine:
             except Exception as exc:
                 logger.warning("[Agent] failed to render KB prompt: %s", exc)
 
-        try:
-            from app.agent.prompts.progressive_rag import build_language_directive
-            directive = build_language_directive(query)
-            if directive:
-                system_prompt = f"{system_prompt}\n\n{directive}"
-        except Exception as exc:
-            logger.warning("[Agent] failed to build language directive: %s", exc)
-
         messages: list[dict] = [{"role": "system", "content": system_prompt}]
         if llm_context:
             messages.extend(_redact_history_kb_results(llm_context))
-        messages.append({"role": "user", "content": query})
+
+        try:
+            from app.agent.prompts.progressive_rag import build_language_directive
+            self._language_directive = build_language_directive(query, llm_context)
+        except Exception as exc:
+            self._language_directive = ""
+            logger.warning("[Agent] failed to build language directive: %s", exc)
+
+        user_content = query
+        if self._language_directive:
+            user_content = (
+                f"{query}\n\n{_TURN_CONTRACT_OPEN}\n"
+                f"{self._language_directive}\n"
+                f"{_TURN_CONTRACT_CLOSE}"
+            )
+        messages.append({"role": "user", "content": user_content})
         self._last_query = query
 
         tools = self._tool_registry.get_function_definitions()
@@ -428,7 +438,12 @@ class AgentEngine:
                 "role": "user",
                 "content": (
                     "Based only on the observations above, write the complete final "
-                    "answer in the user's language. Stop after the answer."
+                    "answer in the required language. Stop after the answer."
+                    + (
+                        f"\n\n{self._language_directive}"
+                        if self._language_directive
+                        else ""
+                    )
                 ),
             })
 
