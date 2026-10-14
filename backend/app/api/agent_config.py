@@ -160,6 +160,11 @@ _BUILTIN_TOOL_CATALOG: list[dict] = [
         "description": "在所选知识库与会话文件中做向量 + 稀疏混合检索",
     },
     {
+        "name": "list_knowledge_documents",
+        "label": "文档清单",
+        "description": "列出当前授权知识库与会话文件中的文档，供全量摘要、覆盖检查与文件发现使用",
+    },
+    {
         "name": "grep_chunks",
         "label": "关键词检索",
         "description": "在主知识库内按关键词精确匹配分块",
@@ -168,6 +173,11 @@ _BUILTIN_TOOL_CATALOG: list[dict] = [
         "name": "list_knowledge_chunks",
         "label": "分页浏览",
         "description": "按原文顺序分页浏览文档分块",
+    },
+    {
+        "name": "summarize_documents",
+        "label": "文档摘要",
+        "description": "按 doc_id 并行生成单文档摘要，适合全库总结与跨文档汇总",
     },
     {
         "name": "web_search",

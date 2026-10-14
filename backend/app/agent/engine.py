@@ -280,6 +280,7 @@ class AgentEngine:
         repeat_tracker = (
             RepeatToolTracker() if self._config.repeat_tool_reminder_enabled else None
         )
+        inventory_reminder_sent = False
 
         while state.current_round < self._config.max_iterations:
             iteration = state.current_round
@@ -391,19 +392,36 @@ class AgentEngine:
                     not rewrite_reminder_added
                     and result.data
                     and result.data.get("suggest_rewrite")
-                    and state.query_rewrite_attempts
-                    < self._config.query_rewrite_max_attempts
                 ):
-                    messages.append({
-                        "role": "user",
-                        "content": (
-                            "The latest retrieval returned no new evidence. "
-                            "Reformulate the query once with different entities, "
-                            "constraints, or wording before deciding to answer."
-                        ),
-                    })
-                    state.query_rewrite_attempts += 1
-                    rewrite_reminder_added = True
+                    if (
+                        state.query_rewrite_attempts
+                        < self._config.query_rewrite_max_attempts
+                    ):
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "The latest retrieval returned no new evidence. "
+                                "Reformulate the query once with different entities, "
+                                "constraints, or wording before deciding to answer."
+                            ),
+                        })
+                        state.query_rewrite_attempts += 1
+                        rewrite_reminder_added = True
+                    elif (
+                        not inventory_reminder_sent
+                        and "list_knowledge_documents"
+                        in self._tool_registry.list_tools()
+                    ):
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "Retrieval still has no new evidence. Call "
+                                "list_knowledge_documents to verify the authorized "
+                                "document scope and available doc_ids before issuing "
+                                "more broad searches."
+                            ),
+                        })
+                        inventory_reminder_sent = True
             state.steps.append(step)
             state.current_round += 1
 

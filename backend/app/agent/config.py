@@ -16,7 +16,8 @@ class AgentConfig:
 
     # 允许使用的工具列表（白名单）
     allowed_tools: list[str] = field(default_factory=lambda: [
-        "knowledge_search", "grep_chunks", "list_knowledge_chunks"
+        "knowledge_search", "grep_chunks", "list_knowledge_chunks",
+        "list_knowledge_documents", "summarize_documents",
     ])
 
     # LLM 生成温度

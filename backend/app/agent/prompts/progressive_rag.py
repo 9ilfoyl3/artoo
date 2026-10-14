@@ -24,6 +24,7 @@ SYSTEM_PROMPT_PLACEHOLDERS = {
     "available_skills": "当前可按需加载的技能列表",
     "web_search_status": "网络搜索是否启用",
     "runtime_clock": "当前日期与时间",
+    "collection_guidance": "文档集合任务的确定性执行规则",
     "user_customization": "管理员配置的角色/语气/工作风格/边界",
 }
 
@@ -83,6 +84,8 @@ You are Artoo, a retrieval-grounded assistant running in a ReAct loop.
 - Cite facts with [1], [2], etc. where applicable and refer to documents by name,
   not internal IDs. Do not narrate tool mechanics in the final answer.
 - If evidence is absent or insufficient, say that plainly instead of guessing.
+
+{collection_guidance}
 
 ## Bound knowledge bases
 {knowledge_base_names}
@@ -151,6 +154,25 @@ def render_system_prompt(
     else:
         runtime_clock = ""
 
+    collection_guidance = ""
+    if "list_knowledge_documents" in tools:
+        summarize_step = (
+            "- Prefer `summarize_documents` for multi-document summaries so each "
+            "document is processed independently before final synthesis.\n"
+            if "summarize_documents" in tools
+            else "- Read each selected document with `list_knowledge_chunks` and "
+            "continue until `fully_read=\"true\"` or the requested scope is complete.\n"
+        )
+        collection_guidance = (
+            "## Document collection tasks\n"
+            "- When the user asks to summarize, compare, inventory, or cover all "
+            "documents, call `list_knowledge_documents` before broad searches.\n"
+            "- Use only doc_ids returned by the catalog. Never infer missing files "
+            "from filename numbering or from search misses.\n"
+            f"{summarize_step}"
+            "- Report unread, unavailable, or out-of-scope documents explicitly.\n"
+        )
+
     return _safe_substitute(_PROMPT, {
         "_IDENTITY_RULE": _IDENTITY_RULE,
         "_CAPABILITY_RULE": _CAPABILITY_RULE,
@@ -160,6 +182,7 @@ def render_system_prompt(
         "available_skills": skills_section,
         "web_search_status": "Enabled." if web_on else "Disabled.",
         "runtime_clock": runtime_clock,
+        "collection_guidance": collection_guidance,
         "user_customization": custom_section,
     })
 

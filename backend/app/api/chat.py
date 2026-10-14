@@ -31,8 +31,10 @@ from app.agent.tools.base import ToolContext
 from app.agent.tools.grep_chunks import GrepChunksTool
 from app.agent.tools.knowledge_search import KnowledgeSearchTool, SearchTarget
 from app.agent.tools.list_chunks import ListKnowledgeChunksTool
+from app.agent.tools.list_documents import ListKnowledgeDocumentsTool
 from app.agent.tools.read_attachment import ReadAttachmentTool
 from app.agent.tools.read_skill import ReadSkillTool
+from app.agent.tools.summarize_documents import SummarizeDocumentsTool
 from app.agent.tools.web_search import WebSearchTool
 from app.agent.tools.registry import ToolRegistry
 from app.agent.tools.mcp_client import get_mcp_tools
@@ -1096,11 +1098,22 @@ async def _build_agent_runtime(
                 cache=retrieval_cache,
             )
         )
+    if _tool_enabled("list_knowledge_documents"):
+        tool_registry.register(
+            ListKnowledgeDocumentsTool(
+                kb_ids=kb_ids,
+                session_id=session_id,
+                include_session_source=include_session_source,
+                state=state,
+            )
+        )
     # grep_chunks / list_knowledge_chunks 仅作用于主库，不接会话源（design C2 决策，非遗漏）。
     if _tool_enabled("grep_chunks") and primary_kb_id:
         tool_registry.register(GrepChunksTool(bm25_retriever, primary_kb_id, state))
     if _tool_enabled("list_knowledge_chunks"):
-        tool_registry.register(ListKnowledgeChunksTool())
+        tool_registry.register(ListKnowledgeChunksTool(state=state))
+    if _tool_enabled("summarize_documents"):
+        tool_registry.register(SummarizeDocumentsTool(llm=llm, state=state))
     # read_attachment：本条消息绑定附件 → 注册确定性整篇直读工具。file_id 在此锚定
     # （来自 request.attachments），LLM 不能指定/伪造，只能选读哪个 filename 或翻页，
     # 杜绝越权；附件解析不再丢进 knowledge_search 与知识库文档竞争召回（WeKnora 借鉴）。

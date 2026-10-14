@@ -44,6 +44,9 @@ class AgentState:
     knowledge_refs: list[RetrievalResult] = field(default_factory=list)
     seen_chunk_ids: set[str] = field(default_factory=set)
     query_rewrite_attempts: int = 0
+    # 通用文档目录与读取覆盖状态：由 list/read 工具维护，帮助集合任务判断是否读全。
+    document_catalog: dict[str, dict[str, Any]] = field(default_factory=dict)
+    document_read_ranges: dict[str, set[int]] = field(default_factory=dict)
     # 检索是否发生降级（H3）：任一次 knowledge_search 工具调用出现源失败或三路路级降级时
     # 由工具置 True（只增不减），供 chat 层据此填充 SSE meta 的真实 degraded（不再恒 False）。
     degraded: bool = False
