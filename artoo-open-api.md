@@ -1699,3 +1699,438 @@ curl $BASE/api/system/health
 - 外部 MCP server 一律配置凭据（6.5.2）：MCP server 通常没有自己的用户鉴权，裸奔暴露等于把业务工具开放给任何能连上的人。
 - 第三方**不得**把未签名的 `X-Artoo-*` 上下文当授权依据（6.5.3）：无签名时它是可伪造的提示。要用于授权，请配置凭据并验签。
 - 「透传调用方上下文」按 server 逐个开启：把 A 方终端用户标识发给不相关的第三方属跨方数据泄露。
+
+---
+
+## 13. 变更日志（Changelog）
+
+本节只追加变更记录，不改写历史条目。业务系统升级前应逐条核对「业务系统必须同步」和「兼容性」。
+
+### 2026-10-15：通用知识库工具、摘要进度与 MCP 结构化反馈
+
+对应提交：
+
+- `ac5ff19 feat(agent): complete generic KB data plane and MCP feedback`
+- `40cf821 fix(agent): activate generic KB tools for built-in presets`
+- `9e6f47e perf(agent): stream summary progress and cache reusable scopes`
+
+#### 13.1 业务系统必须同步的变更
+
+1. 显式配置 `allowed_tools` 的 Agent 预设需要加入新工具；内置 `preset-smart-reasoning` 会自动升级，自定义预设不会。
+2. SSE 与 `agent_steps` 新增 `tool_progress` 事件。
+3. `complete.total_duration_ms` 语义修正为真实请求总耗时；首答延迟改由 `complete.first_answer_ms` 提供。
+4. 外部 MCP 工具若需要恢复、校验或富卡片，应返回 `structuredContent`，并可声明 `outputSchema`。
+5. 业务侧技能、预设提示词和 UI 工具面板应把旧分页读取流程迁移到 `list_knowledge_documents` + `read_document` / `summarize_documents`。
+
+#### 13.2 内置知识库工具名称映射
+
+| 场景 | 稳定工具名 | 说明 | 旧工具 |
+| --- | --- | --- | --- |
+| 全库/多文档发现 | `list_knowledge_documents` | 权威文档清单、分页、稳定 `doc_id`、失败文档可见 | 无 |
+| 单文档完整读取 | `read_document` | 按父块分页读取，返回 `fully_read` / `next_page` | `list_knowledge_chunks` |
+| 多文档摘要 | `summarize_documents` | 逐文档独立 map-reduce，支持缓存与 `tool_progress` | 无 |
+| 精确计算 | `calculate` | Decimal 四则运算、百分比、舍入和安全表达式求值 | 无 |
+| 主题召回 | `knowledge_search` | 语义 + 稀疏混合检索，适合主题定位，不用于证明文档全集 | 不变 |
+| 关键词定位 | `grep_chunks` | 主知识库关键词检索 | 不变 |
+
+推荐新预设的工具白名单：
+
+```json
+{
+  "allowed_tools": [
+    "knowledge_search",
+    "grep_chunks",
+    "list_knowledge_documents",
+    "read_document",
+    "summarize_documents",
+    "calculate"
+  ]
+}
+```
+
+说明：
+
+- `read_document` 已启用时，运行时不再注册 `list_knowledge_chunks`，避免两套读取工具同时暴露。
+- `list_knowledge_chunks` 仅用于旧预设兼容；新预设不要继续勾选。
+- 没有 `allowed_tools` 字段的旧预设仍会看到全部内置工具；显式白名单不会自动扩容，除了内置 `preset-smart-reasoning`。
+
+#### 13.3 `list_knowledge_documents`
+
+输入参数：
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "kb_ids": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "可选；只能选择当前请求已授权的 KB 子集"
+    },
+    "page": {
+      "type": "integer",
+      "default": 1
+    },
+    "page_size": {
+      "type": "integer",
+      "default": 50,
+      "minimum": 1,
+      "maximum": 100
+    },
+    "status": {
+      "type": "string",
+      "description": "可选，如 completed / failed / processing"
+    }
+  }
+}
+```
+
+模型可见输出示例：
+
+```xml
+<documents total="48" page="1" page_size="50" has_more="false">
+  <document doc_id="doc-1" source="document" filename="a.pdf"
+            type="pdf" status="completed" chunk_count="12" kb_id="kb-1" />
+  <document doc_id="file-1" source="session-file" filename="upload.txt"
+            type="txt" status="completed" chunk_count="3" />
+</documents>
+```
+
+工具内部结果数据：
+
+```json
+{
+  "documents": [
+    {
+      "doc_id": "doc-1",
+      "filename": "a.pdf",
+      "file_type": "pdf",
+      "file_size": 123456,
+      "status": "completed",
+      "chunk_count": 12,
+      "kb_id": "kb-1",
+      "source": "document"
+    }
+  ],
+  "total": 48,
+  "page": 1,
+  "page_size": 50,
+  "has_more": false,
+  "next_page": null
+}
+```
+
+注意：内置工具的原始 `output` / `data` 不会通过 SSE 外发。业务前端可以读取 `tool_call.arguments`、`tool_progress` 和 `tool_result` 元数据，但不要把内部 `data` 当作公开 SSE 契约。
+
+#### 13.4 `read_document`
+
+输入参数：
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "doc_id": { "type": "string" },
+    "page": { "type": "integer", "default": 1 },
+    "page_size": { "type": "integer", "default": 20, "minimum": 1, "maximum": 100 }
+  },
+  "required": ["doc_id"]
+}
+```
+
+模型可见输出示例：
+
+```xml
+<document_chunks doc_id="doc-1" page="1" total_pages="2"
+                 total_chunks="12" read_chunks="10" fully_read="false">
+  <chunk position="0" chunk_id="chunk-1" evidence_id="ev_xxx">
+    <content>...</content>
+  </chunk>
+</document_chunks>
+[Document not fully read. Call list_knowledge_chunks again with page=2.]
+```
+
+工具内部结果数据：
+
+```json
+{
+  "doc_id": "doc-1",
+  "page": 1,
+  "page_size": 20,
+  "total_pages": 2,
+  "total_chunks": 12,
+  "has_more": true,
+  "next_page": 2,
+  "read_chunks": 10,
+  "fully_read": false,
+  "evidence_count": 10
+}
+```
+
+业务侧规则：
+
+- 只使用 `list_knowledge_documents` 或检索结果返回的 `doc_id`。
+- 反复读取时以 `fully_read=true` 作为完成条件。
+- `evidence_id` 是稳定引用身份，业务系统如需关联证据，应保存 `doc_id + chunk_id` 或 `evidence_id`。
+
+#### 13.5 `summarize_documents`
+
+输入参数：
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "doc_ids": {
+      "type": "array",
+      "items": { "type": "string" },
+      "minItems": 1,
+      "maxItems": 20
+    },
+    "instruction": {
+      "type": "string",
+      "description": "本次要提取的内容；一次性任务可以不传或传自由文本"
+    },
+    "cache_scope": {
+      "type": "string",
+      "description": "可复用任务的稳定短标识，例如 core-points / meeting-actions"
+    }
+  },
+  "required": ["doc_ids"]
+}
+```
+
+缓存规则：
+
+- 缓存键由 `doc_id + 文档内容版本 + 模型 + cache_scope` 组成。
+- 相同任务类型应始终复用同一个 `cache_scope`，不要让模型自由改写它。
+- 未传 `cache_scope` 时回退使用完整 `instruction`，自由文本每次变化就会导致缓存未命中。
+
+模型可见输出示例：
+
+```xml
+<document_summaries count="2">
+  <document doc_id="doc-1" filename="a.pdf" status="summarized"
+            chunk_count="12" fully_read="true">
+    <summary>...</summary>
+  </document>
+  <document doc_id="doc-2" filename="b.pdf" status="failed">
+    <error>No readable parent chunks were found.</error>
+  </document>
+</document_summaries>
+```
+
+工具内部逐文档结果：
+
+```json
+{
+  "documents": [
+    {
+      "doc_id": "doc-1",
+      "filename": "a.pdf",
+      "source": "document",
+      "success": true,
+      "summary": "...",
+      "chunk_count": 12,
+      "version_hash": "sha256...",
+      "cache_hit": false
+    },
+    {
+      "doc_id": "doc-2",
+      "filename": "b.pdf",
+      "source": "document",
+      "success": false,
+      "error": "No readable parent chunks were found.",
+      "chunk_count": 0
+    }
+  ],
+  "cache_hits": 0,
+  "evidence_count": 2
+}
+```
+
+#### 13.6 `calculate`
+
+输入参数：
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "expression": {
+      "type": "string",
+      "description": "例如 (750+1120-1600) 或 percent(30, 100)"
+    },
+    "precision": {
+      "type": "integer",
+      "default": 2,
+      "minimum": 0,
+      "maximum": 12
+    },
+    "rounding": {
+      "type": "string",
+      "enum": ["half_up", "half_even", "down", "up"],
+      "default": "half_up"
+    }
+  },
+  "required": ["expression"]
+}
+```
+
+支持：`+`、`-`、`*`、`/`、`%`、整数幂、括号、`sum`、`min`、`max`、`percent`、`round`。
+
+模型可见输出：
+
+```text
+(750+1120-1600) = 270.00
+```
+
+工具内部结果数据：
+
+```json
+{
+  "expression": "(750+1120-1600)",
+  "result": "270.00",
+  "precision": 2,
+  "rounding": "half_up"
+}
+```
+
+#### 13.7 SSE 新增 `tool_progress`
+
+长工具现在可以发送：
+
+```json
+{
+  "type": "tool_progress",
+  "tool_name": "summarize_documents",
+  "tool_call_id": "call_2",
+  "iteration": 1,
+  "phase": "document",
+  "completed": 4,
+  "total": 20,
+  "filename": "manual.pdf",
+  "success": true,
+  "cache_hit": false,
+  "elapsed_ms": 1200
+}
+```
+
+字段：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `phase` | string | `start` / `heartbeat` / `document` / `complete` |
+| `completed` | int | 已完成文档数 |
+| `total` | int | 本次调用总文档数 |
+| `filename` | string/null | 最近完成或失败的文档 |
+| `success` | bool/null | 单文档结果；心跳时可能为空 |
+| `cache_hit` | bool/null | 是否为摘要缓存命中 |
+| `elapsed_ms` | int | 当前工具从开始到该事件的耗时 |
+| `message` | string/null | 简短进度文案，例如摘要心跳 |
+
+该事件会进入实时 SSE、`agent_steps` 和历史回放。旧客户端可以忽略，但平台前端会把它更新到对应 `tool_call` 行，不创建新步骤。
+
+#### 13.8 `complete` 耗时语义变化
+
+```json
+{
+  "type": "complete",
+  "total_steps": 3,
+  "total_duration_ms": 256057,
+  "first_answer_ms": 2630
+}
+```
+
+- `total_duration_ms`：整个请求的真实总耗时。
+- `first_answer_ms`：首个 `text_delta` 的时间。
+- 旧版本 `total_duration_ms` 实际表示首答耗时，业务系统如用它显示“首答延迟”，应改为读取 `first_answer_ms`。
+
+#### 13.9 `tool_result` 与多工具即时返回
+
+同一轮多个工具调用时，每个工具完成后会立即产生对应 `tool_result`，不再等待整轮所有工具执行结束。
+
+业务系统应：
+
+- 继续按 `tool_call_id` 回填，不假设结果顺序等于工具调用顺序。
+- 先展示已完成的工具结果，同时保留仍在运行的 `tool_progress`。
+- 只在 `turn_end` / `complete` 后把整轮标记为结束。
+
+#### 13.10 外部 MCP 工具映射与结构化输出
+
+远端工具在 Artoo 里的公开名称由 MCP 配置中的 `tool_prefix` 决定：
+
+```text
+远端 MCP tool name:  read_document
+Artoo display name:  law_read_document
+allowed_tools:       ["law_read_document"]
+```
+
+调用时：
+
+1. 模型看到并调用 `law_read_document`。
+2. SSE `tool_call.tool_name` 为 `law_read_document`。
+3. Artoo 对远端执行 `tools/call` 时传原始名称 `read_document`。
+
+业务系统应避免远端工具名与 Artoo 内置工具重名；需要同时存在时，MCP server 必须配置前缀。
+
+远端 MCP `tools/call` 返回：
+
+```json
+{
+  "content": [
+    { "type": "text", "text": "human/model readable result" }
+  ],
+  "structuredContent": {
+    "kind": "io.company.legal-tool-result.v1",
+    "data": {
+      "items": []
+    },
+    "feedback": {
+      "status": "needs_evidence",
+      "code": "io.company.needs-evidence",
+      "message": "Provide a source identifier.",
+      "recoverable": true,
+      "next_actions": ["request_source", "retry"]
+    }
+  }
+}
+```
+
+约束：
+
+- `structuredContent` 必须是 `{kind, data, feedback?}`。
+- `kind` 为全局命名空间，例如 `io.company.tool-result.v1`。
+- `feedback.status` ∈ `accepted` / `rejected` / `needs_evidence` / `retryable_error` / `completed`。
+- `code` 3-128 字符；`message` 最多 4096 字符；`next_actions` 最多 10 项，每项最多 200 字符。
+- 只有 `recoverable=true` 且状态为 `rejected` / `needs_evidence` / `retryable_error` 时，同一 turn、同一工具和 `code` 最多允许 2 次恢复重试。
+- 原始 `content[].text` 不会进入 SSE 或 `agent_steps`；需要宿主展示的数据必须放进合法 `structuredContent`。
+
+远端 `tools/list` 可以声明 `outputSchema`。Artoo 会先校验 schema，再校验 `structuredContent`；只有合法数据进入：
+
+```json
+{
+  "type": "tool_result",
+  "tool_call_id": "call_7",
+  "tool_name": "law_read_document",
+  "success": true,
+  "duration_ms": 35,
+  "files": [],
+  "structured_content": {
+    "kind": "io.company.legal-tool-result.v1",
+    "data": { "items": [] }
+  }
+}
+```
+
+#### 13.11 业务系统升级清单
+
+1. 自定义 Agent 预设的 `allowed_tools` 加入 `list_knowledge_documents`、`read_document`、`summarize_documents`、`calculate`。
+2. 前端/客户端 SSE 解析器新增 `tool_progress`，按 `tool_call_id` 更新运行中工具行。
+3. 把 `complete.total_duration_ms` 用于真实总耗时；首答延迟改用 `first_answer_ms`。
+4. 把业务预设提示词和技能从 `list_knowledge_chunks` 迁到 `read_document`；全库任务先 `list_knowledge_documents`，多文档优先 `summarize_documents`。
+5. 全局核心摘要统一传递 `cache_scope="core-points"`。
+6. 外部 MCP 工具配置前缀，确保 `allowed_tools` 写公开名称，业务 server 使用原始工具名。
+7. 外部 MCP server 返回 `structuredContent` 时，声明配套 `outputSchema`；原始文本不要依赖 Artoo 透传。
+8. 前端工具卡片同时处理：运行中进度、成功/失败、`files`、`structured_content`、超时或重试反馈。
+9. 业务 system prompt 不要自行编造文档总数，也不要从搜索未命中推断文档不存在。
