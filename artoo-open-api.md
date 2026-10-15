@@ -2134,3 +2134,101 @@ allowed_tools:       ["law_read_document"]
 7. 外部 MCP server 返回 `structuredContent` 时，声明配套 `outputSchema`；原始文本不要依赖 Artoo 透传。
 8. 前端工具卡片同时处理：运行中进度、成功/失败、`files`、`structured_content`、超时或重试反馈。
 9. 业务 system prompt 不要自行编造文档总数，也不要从搜索未命中推断文档不存在。
+
+### 2026-10-15（补充）：业务系统影响面澄清
+
+上一条 `13.11` 中关于 `list_knowledge_documents`、`read_document`、`summarize_documents`、技能提示词和内部工具编排的内容，属于 Artoo 内部 Agent 数据面升级说明，**不是业务系统需要迁移的对话流程**。
+
+业务系统所有 Agent 对话均调用 Artoo 的 `/v1/chat/completions`，因此业务侧只需要适配 Artoo 暴露的协议边界，不需要实现或替换 Artoo 内部工具。
+
+#### 必须适配
+
+1. **SSE `tool_progress`**
+
+   Agent 流中可能新增：
+
+   ```json
+   {
+     "type": "tool_progress",
+     "tool_name": "summarize_documents",
+     "tool_call_id": "call_2",
+     "iteration": 1,
+     "phase": "heartbeat",
+     "completed": 4,
+     "total": 20,
+     "cache_hit": false,
+     "elapsed_ms": 10002
+   }
+   ```
+
+   - 支持按 `tool_call_id` 更新运行中工具卡片。
+   - 不支持时应忽略未知事件，不能把它当错误或结束信号。
+   - 历史 `agent_steps` 中也会出现该类型，严格 schema 客户端需要允许。
+
+2. **`complete` 字段语义**
+
+   ```json
+   {
+     "type": "complete",
+     "total_steps": 3,
+     "total_duration_ms": 256057,
+     "first_answer_ms": 2630
+   }
+   ```
+
+   - `total_duration_ms` 现在是完整请求耗时。
+   - 如果业务端原本把它显示为首答耗时，应改用 `first_answer_ms`。
+
+3. **`tool_result` 到达时机**
+
+   同一轮多个工具调用时，各 `tool_result` 按实际完成顺序返回，不保证与 `tool_call` 顺序一致。业务端必须继续以 `tool_call_id` 做关联，不能按数组位置匹配。
+
+4. **业务系统作为外部 MCP server 时的协议**
+
+   仅当业务系统自己提供外部 MCP 工具时，才需要实现：
+
+   - `tools/list` 返回 `outputSchema`；
+   - `tools/call` 返回合法的 `structuredContent: {kind, data, feedback?}`；
+   - `feedback` 使用 `accepted` / `rejected` / `needs_evidence` / `retryable_error` / `completed`；
+   - 需要宿主恢复行为的反馈提供 `recoverable` 和 `next_actions`；
+   - 原始 MCP `content[].text` 不依赖 Artoo 透传到业务前端。
+
+   如果业务系统只负责发起 Agent 对话、不实现 MCP server，则这一项不需要开发。
+
+5. **MCP 工具名前缀**
+
+   仅当业务系统注册外部 MCP server 时，才有名称映射问题：
+
+   ```text
+   MCP server 原始名: read_document
+   Artoo 公开工具名:  law_read_document
+   allowed_tools:     ["law_read_document"]
+   ```
+
+   Artoo 调用远端时会把 `law_read_document` 还原为 `read_document`。如果业务系统不管理 MCP server，则无需处理。
+
+6. **Agent 预设工具白名单**
+
+   仅当业务系统通过管理接口创建或更新自己的 Agent 预设，并且显式维护 `allowed_tools` 时，才需要把
+   `list_knowledge_documents`、`read_document`、`summarize_documents`、`calculate`
+   加入对应白名单。
+
+   如果业务系统只是传入已有预设 ID 或使用默认预设，不需要改动。
+
+#### 不需要适配
+
+- 不需要业务系统实现 `list_knowledge_documents`、`read_document`、`summarize_documents` 或 `calculate`。
+- 不需要业务系统迁移提示词、技能或工具编排流程。
+- 不需要修改 Chat 请求体、鉴权、会话、`knowledge_base_id`、`agent_preset_id` 或 `stream` 调用方式。
+- 不需要处理 Artoo 内部 `ToolResult.output` / `ToolResult.data`；它们不是公开 SSE 契约。
+- 不需要修改普通 `text_delta`、`reasoning_delta`、`references`、`turn_end` 的既有消费方式。
+
+#### 最小兼容实现
+
+业务系统最低限度只需要：
+
+1. SSE 解析器允许并忽略或渲染 `tool_progress`。
+2. `agent_steps` 类型允许 `tool_progress`。
+3. 把 `complete.total_duration_ms` 当真实总耗时，把 `first_answer_ms` 当首答耗时。
+4. `tool_result` 始终按 `tool_call_id` 关联。
+5. 若自身是外部 MCP server，再实现 `outputSchema`、`structuredContent` 和 `feedback`。
