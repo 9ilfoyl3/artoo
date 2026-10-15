@@ -2232,3 +2232,97 @@ allowed_tools:       ["law_read_document"]
 3. 把 `complete.total_duration_ms` 当真实总耗时，把 `first_answer_ms` 当首答耗时。
 4. `tool_result` 始终按 `tool_call_id` 关联。
 5. 若自身是外部 MCP server，再实现 `outputSchema`、`structuredContent` 和 `feedback`。
+
+### 2026-10-15（补充二）：两个 `read_document` 不是同一资源域
+
+`read_document` 这个名称可能同时出现在两个位置，但它们读取的资源不同，不能互相替代：
+
+| 工具来源 | 公开工具名 | 资源域 | 负责方 |
+| --- | --- | --- | --- |
+| Artoo 内置工具 | `read_document` | Artoo 知识库文档、会话文件 | Artoo |
+| 业务外部 MCP | 建议 `law_read_document` / `biz_read_document` | 业务系统产物、业务文书、当前业务对象版本 | 业务系统 |
+
+#### Artoo 内置 `read_document`
+
+输入：
+
+```json
+{
+  "doc_id": "artoo-doc-id",
+  "page": 1,
+  "page_size": 20
+}
+```
+
+职责：
+
+- 读取 Artoo 知识库中的文档；
+- 读取当前会话上传文件；
+- 返回 Artoo 的父块内容、`chunk_id`、`evidence_id`、`fully_read`；
+- 不识别业务文书版本、业务锚点、Fact Ledger 或业务权限。
+
+#### 业务 MCP `read_document`
+
+业务远端名称可以仍叫 `read_document`，但 Artoo 暴露给模型的公开名必须是带前缀的名称，例如：
+
+```text
+MCP server 远端名称: read_document
+Artoo 公开工具名:    law_read_document
+allowed_tools:       ["law_read_document"]
+```
+
+调用时：
+
+```text
+模型调用: law_read_document
+Artoo 远端调用: read_document
+```
+
+业务工具应负责：
+
+- 当前业务文书、产物或业务对象的读取；
+- `document_id`、`document_version`、`resolved_document_id`、`resolved_version`；
+- `section/node range`、`anchor_hash`、`has_more`；
+- 业务文档权限校验；
+- 是否绑定当前会话或当前业务对象；
+- 将结果放入 `structuredContent.data`，供业务前端和审计系统使用。
+
+推荐的业务 MCP 公开输入：
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "document_id": { "type": "string" },
+    "document_version": { "type": "string" },
+    "section_start": { "type": "string" },
+    "section_end": { "type": "string" },
+    "page": { "type": "integer", "default": 1 },
+    "page_size": { "type": "integer", "default": 20 }
+  },
+  "required": ["document_id"]
+}
+```
+
+如果业务系统允许按当前会话隐式定位文书，输入中的 `document_id` 可以省略或由 Artoo 上下文传递给远端，但返回值必须显式包含：
+
+```json
+{
+  "resolved_document_id": "biz-doc-001",
+  "resolved_version": "v12",
+  "anchor_hash": "sha256:...",
+  "node_range": ["section-3", "section-5"],
+  "content": "...",
+  "has_more": false
+}
+```
+
+#### 名称冲突规则
+
+1. Artoo 内置 `read_document` 和业务 MCP `read_document` 不能以相同公开名同时注册。
+2. 业务 MCP 必须配置工具前缀，例如 `law_`、`biz_` 或 `case_`。
+3. `allowed_tools` 写公开名，不写远端原始名。
+4. 业务 system prompt、技能和前端工具卡片必须分别描述两个工具的用途：
+   - Artoo 文档：`read_document`
+   - 业务文书：`law_read_document` 或实际配置前缀名
+5. Artoo 只负责把业务 MCP 的结构化结果传给宿主，不负责判断业务文档版本、锚点或审批状态。
