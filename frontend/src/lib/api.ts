@@ -196,6 +196,19 @@ export interface DocumentEvent {
   entity_names: string[]
 }
 
+export interface DocumentSummaryPreview {
+  doc_id: string
+  status: 'missing' | 'pending' | 'processing' | 'completed' | 'failed' | string
+  summary: string | null
+  gist: string | null
+  topics: string[]
+  doc_type: string | null
+  typical_question: string | null
+  content_version: string | null
+  chunk_count: number
+  generated_at: string | null
+}
+
 // 文档相关接口
 export const documentApi = {
   list: (
@@ -267,6 +280,9 @@ export const documentApi = {
     }>
   },
   get: (id: string) => request<unknown>(`/documents/${id}`),
+  // 只读摘要制品：后端不会在此接口触发生成，生成始终由独立 worker lane 异步完成。
+  summary: (id: string) =>
+    request<DocumentSummaryPreview>(`/documents/${id}/summary`),
   delete: (id: string) =>
     request<void>(`/documents/${id}`, { method: 'DELETE' }),
   batchDelete: (docIds: string[]) =>

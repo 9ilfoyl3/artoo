@@ -44,6 +44,13 @@ task; a separate worker generates a thinking-disabled JSON profile with
 versioned by parent-chunk IDs and content. Summary retrieval reads the
 authoritative PostgreSQL row; Redis is not a correctness dependency.
 
+The document list exposes the artifact through a read-only
+`GET /api/documents/{doc_id}/summary` endpoint. The React file grid and list
+reuse one structured preview component for a one-second hover tooltip and the
+file operation menu's summary dialog. The preview never triggers generation;
+missing artifacts show an explicit not-yet-generated state while the
+independent worker continues in the background.
+
 The Agent core also now uses provider usage to calibrate token estimates,
 persists compacted checkpoints by session and prompt fingerprint, uses a
 per-chunk stall watchdog instead of a total stream timeout, conservatively
@@ -110,6 +117,8 @@ summary mode, mutation barriers, stall watchdogs, document filtering and
 summary status, authorized document reading, and summary profile
 normalization. Existing Agent, retrieval, structured-result, and data-plane
 suites cover the compatibility-sensitive loop and protocol paths.
+The frontend `DocumentSummaryPreview` test covers completed artifacts and the
+explicit missing-artifact state.
 
 The real 48-document KB A/B run (`backend/benchmarks/results/2026-10-16-unified-agent-ab.json`)
 shows the search-only baseline answering in 30.5 seconds after 4 retrieval calls

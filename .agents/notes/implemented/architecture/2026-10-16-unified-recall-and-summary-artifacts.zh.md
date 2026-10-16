@@ -37,6 +37,11 @@ token overlap 的近重复去除、子块到父块扩展、有界邻块扩展、
 制品按父块 ID 与内容版本化。摘要检索读取 PostgreSQL 权威记录，Redis 不是正确性
 依赖。
 
+文档列表通过只读端点 `GET /api/documents/{doc_id}/summary` 暴露制品。React 文件
+网格与列表复用同一个结构化预览组件：悬浮 1 秒显示 tooltip，文件操作菜单打开摘要
+预览对话框。预览不会触发生成；缺失制品时明确显示暂未生成，后台独立 worker 继续
+异步处理。
+
 Agent core 还使用 provider usage 校准 token 估算，按 session 与 prompt 指纹持久化
 压缩 checkpoint，把总流超时替换为逐 chunk stall watchdog，对 JSON 做保守修复但
 拒绝执行截断或非法工具参数，设置按工具独立的输出预算，并将只读并发与 mutation
@@ -84,6 +89,7 @@ per-tool 输出预算、Todo 校验、确定性检索后处理、token 校准、
 统一 summary 模式、mutation barrier、stall watchdog、文档过滤与摘要状态、授权读取，
 以及摘要 profile 规范化。既有 Agent、retrieval、structured-result 与 data-plane
 套件覆盖兼容敏感 loop 和协议路径。
+前端 `DocumentSummaryPreview` 测试覆盖已完成制品和显式缺失态。
 
 真实 48 文档 KB A/B 运行
 （`backend/benchmarks/results/2026-10-16-unified-agent-ab.json`）显示：search-only

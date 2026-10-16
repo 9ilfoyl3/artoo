@@ -1756,6 +1756,25 @@ curl $BASE/api/system/health
 
 这是 Artoo 内部能力，不需要业务系统新增数据库表、API 或 MCP 工具。部署侧需要让 worker 进程启动摘要 lane，并保证 Redis Stream 可用；摘要失败不会回滚文档入库。
 
+管理端点 `GET /api/documents/{doc_id}/summary` 是只读预览接口：
+
+```json
+{
+  "doc_id": "doc-1",
+  "status": "completed",
+  "summary": "文档核心摘要",
+  "gist": "一句话摘要",
+  "topics": ["主题一", "主题二"],
+  "doc_type": "操作手册",
+  "typical_question": "如何使用该文档？",
+  "content_version": "sha256",
+  "chunk_count": 3,
+  "generated_at": "2026-10-16T00:00:00+00:00"
+}
+```
+
+当摘要尚未生成时返回 `status="missing"`；`pending` / `processing` / `failed` 也会原样返回。该接口只读取 `document_summaries`，不会触发摘要任务，也不会阻塞上传、解析、索引或其他文档操作。
+
 #### 13.0.4 两个 `read_document` 的边界保持不变
 
 Artoo 内置 `read_document` 只读取 Artoo 授权的知识库文档和当前会话文件，按 `doc_id` / `chunk_id`、`offset`、`query` / `regex` 工作。业务系统 MCP 提供的 `read_document` 仍用于业务产物文书、业务版本和业务锚点，两者资源域与权限域不同。
