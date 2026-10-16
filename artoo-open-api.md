@@ -451,6 +451,56 @@ curl $BASE/api/files/<file_id>/content \
 - 鉴权与隔离：KB 文档跨租户不可见即 `404`；会话临时文件叠加归属校验（仅本人可读，外部用户之间互不可见）。id 不存在 / 无权 → `404`（存在性非泄露）。
 - 如只需要 KB 文档的分块（可分页、含子块高亮），仍可用 4.8 的 `GET /api/documents/{doc_id}/chunks`。
 
+### 4.12 文档摘要预览（只读）
+
+`GET /api/documents/{doc_id}/summary`
+
+读取文档入库后异步生成的摘要制品。该接口**不会触发生成任务**，也不会等待上传、解析、索引或其他文档操作，适合业务系统做文件列表悬浮预览或详情展示。
+
+```bash
+curl $BASE/api/documents/<doc_id>/summary \
+  -H "Authorization: Bearer $KEY" -H "X-External-User-Id: $EU"
+```
+
+已生成：
+
+```json
+{
+  "doc_id": "doc-71bc...",
+  "status": "completed",
+  "summary": "文档核心摘要",
+  "gist": "一句话摘要",
+  "topics": ["主题一", "主题二"],
+  "doc_type": "操作手册",
+  "typical_question": "如何使用该文档？",
+  "content_version": "sha256",
+  "chunk_count": 3,
+  "generated_at": "2026-10-16T00:00:00+00:00"
+}
+```
+
+尚未生成或生成中：
+
+```json
+{
+  "doc_id": "doc-71bc...",
+  "status": "missing",
+  "summary": null,
+  "gist": null,
+  "topics": [],
+  "doc_type": null,
+  "typical_question": null,
+  "content_version": null,
+  "chunk_count": 0,
+  "generated_at": null
+}
+```
+
+- `status`：`missing` / `pending` / `processing` / `completed` / `failed`。
+- 鉴权：允许 JWT、API Key、代理 Key 与 AK/SK 通道；必须对文档所属 KB 具备读权限，无权限 / 不存在统一 `404`。
+- 代理 Key 调用时必须同时带 `X-External-User-Id`。
+- 摘要生成由 `pipeline:summaries` 独立 worker lane 异步完成；本接口只读 `document_summaries`，不负责重试或补生成。
+
 ---
 
 ## 5. 文件夹
@@ -1756,7 +1806,7 @@ curl $BASE/api/system/health
 
 这是 Artoo 内部能力，不需要业务系统新增数据库表、API 或 MCP 工具。部署侧需要让 worker 进程启动摘要 lane，并保证 Redis Stream 可用；摘要失败不会回滚文档入库。
 
-管理端点 `GET /api/documents/{doc_id}/summary` 是只读预览接口：
+只读端点 `GET /api/documents/{doc_id}/summary` 是正式对外预览接口：
 
 ```json
 {

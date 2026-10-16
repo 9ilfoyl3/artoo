@@ -49,7 +49,9 @@ The document list exposes the artifact through a read-only
 reuse one structured preview component for a one-second hover tooltip and the
 file operation menu's summary dialog. The preview never triggers generation;
 missing artifacts show an explicit not-yet-generated state while the
-independent worker continues in the background.
+independent worker continues in the background. The endpoint is part of the
+Open API: JWT, API Key, proxy Key, and AK/SK callers may use it subject to the
+same KB read authorization as document listing.
 
 The Agent core also now uses provider usage to calibrate token estimates,
 persists compacted checkpoints by session and prompt fingerprint, uses a

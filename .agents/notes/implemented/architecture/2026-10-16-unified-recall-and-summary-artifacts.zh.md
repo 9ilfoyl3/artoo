@@ -40,7 +40,8 @@ token overlap 的近重复去除、子块到父块扩展、有界邻块扩展、
 文档列表通过只读端点 `GET /api/documents/{doc_id}/summary` 暴露制品。React 文件
 网格与列表复用同一个结构化预览组件：悬浮 1 秒显示 tooltip，文件操作菜单打开摘要
 预览对话框。预览不会触发生成；缺失制品时明确显示暂未生成，后台独立 worker 继续
-异步处理。
+异步处理。该端点属于 Open API：JWT、API Key、代理 Key 与 AK/SK 调用方均可在
+满足与文档列表相同的 KB 读权限前提下调用。
 
 Agent core 还使用 provider usage 校准 token 估算，按 session 与 prompt 指纹持久化
 压缩 checkpoint，把总流超时替换为逐 chunk stall watchdog，对 JSON 做保守修复但
