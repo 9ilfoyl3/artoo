@@ -771,6 +771,7 @@ export interface AgentPresetItem {
     max_iterations?: number
     temperature?: number
     thinking_enabled?: boolean
+    parallel_tool_calls?: boolean
     allowed_tools?: string[]
     custom_instructions?: string
   } | null

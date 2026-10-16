@@ -665,6 +665,7 @@ class AgentEngine:
                 },
             ))
 
+        records: list[ToolCallRecord | None] = [None for _ in parsed]
         results: list[tuple[LLMToolCall, ToolResult, str | None] | None] = [
             None for _ in parsed
         ]
@@ -676,13 +677,13 @@ class AgentEngine:
             result: ToolResult,
             duration_ms: int,
         ) -> None:
-            step.tool_calls.append(ToolCallRecord(
+            records[index] = ToolCallRecord(
                 id=call.id,
                 name=call.function_name,
                 args=args,
                 result=result,
                 duration_ms=duration_ms,
-            ))
+            )
             event_data = {
                 "tool_call_id": call.id,
                 "tool_name": call.function_name,
@@ -706,21 +707,43 @@ class AgentEngine:
             results[index] = (call, result, reminder)
 
         if self._config.parallel_tool_calls and len(parsed) > 1:
-            task_meta = {}
-            for index, (call, args) in enumerate(parsed):
-                task = asyncio.create_task(
-                    self._execute_single_tool(
+            max_concurrency = max(
+                1, int(getattr(self._config, "tool_call_max_concurrency", 1) or 1)
+            )
+            semaphore = asyncio.Semaphore(max_concurrency)
+            logger.info(
+                "[Agent] executing %d tool calls in parallel (max_concurrency=%d)",
+                len(parsed),
+                max_concurrency,
+            )
+
+            async def execute_limited(
+                index: int,
+                call: LLMToolCall,
+                args: dict,
+            ) -> tuple[int, LLMToolCall, dict, ToolResult, int]:
+                async with semaphore:
+                    result, duration_ms = await self._execute_single_tool(
                         call,
                         args,
                         step=step,
                         session_id=session_id,
                     )
-                )
-                task_meta[task] = (index, call, args)
-            for task in asyncio.as_completed(task_meta):
-                result, duration_ms = await task
-                index, call, args = task_meta[task]
-                await record_outcome(index, call, args, result, duration_ms)
+                return index, call, args, result, duration_ms
+
+            tasks = [
+                asyncio.create_task(execute_limited(index, call, args))
+                for index, (call, args) in enumerate(parsed)
+            ]
+            try:
+                for completed in asyncio.as_completed(tasks):
+                    index, call, args, result, duration_ms = await completed
+                    await record_outcome(index, call, args, result, duration_ms)
+            finally:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
         else:
             for index, (call, args) in enumerate(parsed):
                 result, duration_ms = await self._execute_single_tool(
@@ -731,6 +754,7 @@ class AgentEngine:
                 )
                 await record_outcome(index, call, args, result, duration_ms)
 
+        step.tool_calls.extend(record for record in records if record is not None)
         return [item for item in results if item is not None]
 
     async def _execute_single_tool(

@@ -35,8 +35,12 @@ class AgentConfig:
     # 可选的 provider 原生 reasoning effort；仅显式配置时透传，避免不支持该字段的端点拒绝请求。
     reasoning_effort: str | None = None
 
-    # 是否允许并行执行多个工具调用
+    # 是否允许并行执行同一模型响应中的多个工具调用。
+    # 由预设显式开启；并发上限由平台配置统一控制。
     parallel_tool_calls: bool = False
+
+    # 单轮工具调用的最大在途数。运行时由平台配置注入，避免租户预设放大资源占用。
+    tool_call_max_concurrency: int = 4
 
     # P0：完全相同工具调用达到阈值时向模型注入 advisory reminder。
     repeat_tool_reminder_enabled: bool = True

@@ -1022,6 +1022,24 @@ async def _has_whitelisted_mcp_tools(preset_allowed: list[str] | None) -> bool:
         return False
 
 
+def _resolve_parallel_tool_config(
+    preset_cfg: dict,
+    max_concurrency: object,
+) -> tuple[bool, int]:
+    """Resolve preset opt-in and normalize the platform concurrency cap."""
+    try:
+        bounded_concurrency = max(1, int(max_concurrency))
+    except (TypeError, ValueError):
+        bounded_concurrency = 1
+    enabled = preset_cfg.get("parallel_tool_calls", False)
+    if isinstance(enabled, str):
+        normalized = enabled.strip().casefold()
+        enabled = normalized in {"1", "true", "yes", "on"}
+    else:
+        enabled = bool(enabled)
+    return enabled, bounded_concurrency
+
+
 async def _build_agent_runtime(
     kb_ids: list[str],
     llm: LLMProvider,
@@ -1213,6 +1231,10 @@ async def _build_agent_runtime(
         timezone_name=timezone_name,
         include_clock=False,
     )
+    parallel_tool_calls, tool_call_max_concurrency = _resolve_parallel_tool_config(
+        preset_cfg,
+        settings.agent_tool_call_max_concurrency,
+    )
     config = AgentConfig(
         max_iterations=preset_cfg.get("max_iterations", settings.agent_max_iterations),
         max_context_tokens=max_context_tokens or AgentConfig.max_context_tokens,
@@ -1222,6 +1244,8 @@ async def _build_agent_runtime(
         # thinking_enabled 现在只表示“是否开启模型原生 thinking/reasoning 通道”，
         # 不再注册 ThinkingTool。小模型没有独立通道时，loop 会在服务端做能力兼容。
         thinking_enabled=preset_cfg.get("thinking_enabled", True),
+        parallel_tool_calls=parallel_tool_calls,
+        tool_call_max_concurrency=tool_call_max_concurrency,
         system_prompt=system_prompt,
         custom_instructions=custom_instructions,
         timezone_name=timezone_name,

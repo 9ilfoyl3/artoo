@@ -104,6 +104,8 @@ class Settings(BaseSettings):
 
     # Agent
     agent_max_iterations: int = 10
+    # 平台级上限：同一 Agent 轮次内并行执行的工具调用数量。
+    agent_tool_call_max_concurrency: int = 4
     agent_timeout: float = 30.0
     searxng_url: str = "http://localhost:8080"
 

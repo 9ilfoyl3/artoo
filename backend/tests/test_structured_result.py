@@ -9,7 +9,7 @@ from app.agent.config import AgentConfig
 from app.agent.tools.base import BaseTool, ToolResult
 from app.agent.engine import AgentEngine, _tool_feedback_notice
 from app.agent.events import AgentEvent, EventBus, EventType
-from app.api.chat import _agent_event_to_sse
+from app.api.chat import _agent_event_to_sse, _resolve_parallel_tool_config
 from app.agent.tools.registry import ToolRegistry
 from app.agent.tools.structured_result import (
     MAX_STRUCTURED_ARRAY_ITEMS,
@@ -126,6 +126,64 @@ class _TimedTool(BaseTool):
         return ToolResult(success=True, output=self._name)
 
 
+class _ExplodingTool(BaseTool):
+    def __init__(self, name: str, delay: float = 0.01) -> None:
+        self._name = name
+        self._delay = delay
+        self.started_at: float | None = None
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def description(self) -> str:
+        return "exploding test tool"
+
+    @property
+    def parameters(self) -> dict:
+        return {"type": "object", "properties": {}}
+
+    async def execute(self, args: dict) -> ToolResult:
+        self.started_at = time.perf_counter()
+        await asyncio.sleep(self._delay)
+        raise RuntimeError("boom")
+
+
+class _ConcurrencyProbe:
+    def __init__(self) -> None:
+        self.active = 0
+        self.max_active = 0
+
+
+class _ProbedTool(BaseTool):
+    def __init__(self, name: str, probe: _ConcurrencyProbe, delay: float = 0.02) -> None:
+        self._name = name
+        self._probe = probe
+        self._delay = delay
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def description(self) -> str:
+        return "concurrency probe tool"
+
+    @property
+    def parameters(self) -> dict:
+        return {"type": "object", "properties": {}}
+
+    async def execute(self, args: dict) -> ToolResult:
+        self._probe.active += 1
+        self._probe.max_active = max(self._probe.max_active, self._probe.active)
+        try:
+            await asyncio.sleep(self._delay)
+        finally:
+            self._probe.active -= 1
+        return ToolResult(success=True, output=self._name)
+
+
 class _TwoToolLLM:
     def __init__(self) -> None:
         self.calls = 0
@@ -142,6 +200,17 @@ class _TwoToolLLM:
             ],
             finish_reason="tool_calls",
         )
+
+
+class _ToolCallListLLM:
+    def __init__(self, tool_calls: list[LLMToolCall]) -> None:
+        self._tool_calls = tool_calls
+
+    async def stream_with_tools(self, messages, tools, **kwargs):
+        if any(message.get("role") == "tool" for message in messages):
+            yield StreamChunk(content="finished", finish_reason="stop")
+            return
+        yield StreamChunk(tool_calls=self._tool_calls, finish_reason="tool_calls")
 
 
 def test_normalize_structured_content_accepts_valid_envelope():
@@ -372,6 +441,121 @@ def test_sequential_tool_result_is_emitted_before_next_tool_starts():
     assert state.final_answer == "finished"
     assert fast.started_at is not None
     assert result_times["slow_tool"] < fast.started_at
+
+
+def test_parallel_tool_calls_overlap_and_preserve_result_order():
+    slow = _TimedTool("slow_tool", 0.05)
+    fast = _TimedTool("fast_tool", 0.01)
+    registry = ToolRegistry()
+    registry.register(slow)
+    registry.register(fast)
+    bus = EventBus()
+    result_times = {}
+
+    async def collect(event):
+        if event.type == EventType.TOOL_RESULT:
+            result_times[event.data["tool_name"]] = time.perf_counter()
+
+    bus.on(EventType.TOOL_RESULT, collect)
+    engine = AgentEngine(
+        AgentConfig(
+            system_prompt="stable",
+            max_iterations=2,
+            parallel_tool_calls=True,
+            tool_call_max_concurrency=2,
+        ),
+        _TwoToolLLM(),
+        registry,
+        bus,
+    )
+
+    state = asyncio.run(engine.execute("session", "run tools"))
+
+    assert state.final_answer == "finished"
+    assert slow.started_at is not None
+    assert fast.started_at is not None
+    assert fast.started_at < result_times["slow_tool"]
+    assert result_times["fast_tool"] < result_times["slow_tool"]
+    assert [record.name for record in state.steps[0].tool_calls] == [
+        "slow_tool",
+        "fast_tool",
+    ]
+
+
+def test_parallel_tool_calls_isolate_tool_exceptions():
+    exploding = _ExplodingTool("exploding_tool")
+    healthy = _TimedTool("healthy_tool", 0.01)
+    registry = ToolRegistry()
+    registry.register(exploding)
+    registry.register(healthy)
+    engine = AgentEngine(
+        AgentConfig(
+            system_prompt="stable",
+            max_iterations=2,
+            parallel_tool_calls=True,
+            tool_call_max_concurrency=2,
+        ),
+        _ToolCallListLLM([
+            LLMToolCall("exploding-call", "exploding_tool", "{}"),
+            LLMToolCall("healthy-call", "healthy_tool", "{}"),
+        ]),
+        registry,
+        EventBus(),
+    )
+
+    state = asyncio.run(engine.execute("session", "run tools"))
+
+    records = {record.name: record for record in state.steps[0].tool_calls}
+    assert state.final_answer == "finished"
+    assert records["exploding_tool"].result is not None
+    assert records["exploding_tool"].result.success is False
+    assert "boom" in records["exploding_tool"].result.error
+    assert records["healthy_tool"].result is not None
+    assert records["healthy_tool"].result.success is True
+
+
+def test_parallel_tool_calls_respect_max_concurrency():
+    probe = _ConcurrencyProbe()
+    registry = ToolRegistry()
+    for name in ("tool_a", "tool_b", "tool_c"):
+        registry.register(_ProbedTool(name, probe))
+    engine = AgentEngine(
+        AgentConfig(
+            system_prompt="stable",
+            max_iterations=2,
+            parallel_tool_calls=True,
+            tool_call_max_concurrency=2,
+        ),
+        _ToolCallListLLM([
+            LLMToolCall("call-a", "tool_a", "{}"),
+            LLMToolCall("call-b", "tool_b", "{}"),
+            LLMToolCall("call-c", "tool_c", "{}"),
+        ]),
+        registry,
+        EventBus(),
+    )
+
+    state = asyncio.run(engine.execute("session", "run tools"))
+
+    assert state.final_answer == "finished"
+    assert probe.max_active == 2
+
+
+def test_parallel_tool_config_requires_preset_opt_in_and_clamps_platform_cap():
+    assert _resolve_parallel_tool_config({}, 4) == (False, 4)
+    assert _resolve_parallel_tool_config({"parallel_tool_calls": True}, 4) == (
+        True,
+        4,
+    )
+    assert _resolve_parallel_tool_config(
+        {"parallel_tool_calls": True}, 0
+    ) == (True, 1)
+    assert _resolve_parallel_tool_config(
+        {"parallel_tool_calls": True}, "invalid"
+    ) == (True, 1)
+    assert _resolve_parallel_tool_config(
+        {"parallel_tool_calls": "false"}, 4
+    ) == (False, 4)
 
 
 def test_tool_progress_serializes_as_a_separate_sse_event():

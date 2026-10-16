@@ -119,6 +119,7 @@ _BUILTIN_PRESETS = [
             "agent_mode": "hybrid",
             "max_iterations": 5,
             "thinking_enabled": False,
+            "parallel_tool_calls": False,
             "temperature": 0.3,
         },
         "is_default": False,
@@ -135,6 +136,7 @@ _BUILTIN_PRESETS = [
             "agent_mode": "agent",
             "max_iterations": 20,
             "thinking_enabled": True,
+            "parallel_tool_calls": True,
             "temperature": 0.7,
             "allowed_tools": [
                 "knowledge_search",

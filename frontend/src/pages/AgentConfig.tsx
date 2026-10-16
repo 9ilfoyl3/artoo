@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Plus, Pencil, Trash2, Star, Bot, Thermometer, RotateCcw, Brain, Wand2, Loader2, Share2, Lock, Globe, Plug, AlertCircle } from 'lucide-react'
+import { Plus, Pencil, Trash2, Star, Bot, Thermometer, RotateCcw, Brain, Wand2, Loader2, Share2, Lock, Globe, Plug, AlertCircle, GitFork } from 'lucide-react'
 import { agentPresetApi } from '@/lib/api'
 import type { AgentToolOption } from '@/lib/api'
 import { useAuth } from '@/lib/auth-context'
@@ -24,6 +24,7 @@ interface AgentPresetItem {
     max_iterations?: number
     temperature?: number
     thinking_enabled?: boolean
+    parallel_tool_calls?: boolean
     allowed_tools?: string[]
     custom_instructions?: string
   } | null
@@ -45,6 +46,7 @@ interface FormData {
   max_iterations: string
   temperature: string
   thinking_enabled: boolean
+  parallel_tool_calls: boolean
   allowed_tools: string[]
   custom_instructions: string
   is_shared: boolean
@@ -57,6 +59,7 @@ const emptyForm: FormData = {
   max_iterations: '20',
   temperature: '0.7',
   thinking_enabled: true,
+  parallel_tool_calls: false,
   allowed_tools: ['knowledge_search', 'grep_chunks', 'list_knowledge_chunks', 'read_document', 'list_knowledge_documents', 'summarize_documents', 'calculate'],
   custom_instructions: '',
   is_shared: false,
@@ -100,6 +103,7 @@ function AgentConfig() {
         max_iterations: parseInt(data.max_iterations) || 20,
         temperature: parseFloat(data.temperature) || 0.7,
         thinking_enabled: data.thinking_enabled,
+        parallel_tool_calls: data.parallel_tool_calls,
         allowed_tools: data.allowed_tools,
         custom_instructions: data.custom_instructions.trim() || undefined,
       },
@@ -120,6 +124,7 @@ function AgentConfig() {
         max_iterations: parseInt(data.max_iterations) || 20,
         temperature: parseFloat(data.temperature) || 0.7,
         thinking_enabled: data.thinking_enabled,
+        parallel_tool_calls: data.parallel_tool_calls,
         allowed_tools: data.allowed_tools,
         custom_instructions: data.custom_instructions.trim() || undefined,
       },
@@ -194,6 +199,7 @@ function AgentConfig() {
       max_iterations: String(item.config_json?.max_iterations ?? 20),
       temperature: String(item.config_json?.temperature ?? 0.7),
       thinking_enabled: item.config_json?.thinking_enabled ?? true,
+      parallel_tool_calls: item.config_json?.parallel_tool_calls ?? false,
       allowed_tools: item.config_json?.allowed_tools ?? emptyForm.allowed_tools,
       custom_instructions: item.config_json?.custom_instructions ?? '',
       is_shared: item.is_shared,
@@ -367,6 +373,10 @@ function AgentConfig() {
                   <Brain className="h-3.5 w-3.5" />
                   <span>深度思考: {preset.config_json?.thinking_enabled ? '开启' : '关闭'}</span>
                 </p>
+                <p className="flex items-center gap-1.5">
+                  <GitFork className="h-3.5 w-3.5" />
+                  <span>并行工具: {preset.config_json?.parallel_tool_calls ? '开启' : '关闭'}</span>
+                </p>
               </div>
 
               {/* 底部操作区：mt-auto 贴底，保证所有卡片底栏对齐 */}
@@ -513,6 +523,20 @@ function AgentConfig() {
                 id="thinking_enabled"
                 checked={form.thinking_enabled}
                 onCheckedChange={(checked) => setForm({ ...form, thinking_enabled: checked })}
+              />
+            </div>
+            <div className="flex items-center justify-between rounded-lg border border-border bg-muted/30 px-3 py-2.5">
+              <div className="flex items-center gap-2">
+                <GitFork className="h-4 w-4 text-muted-foreground" />
+                <div>
+                  <Label htmlFor="parallel_tool_calls" className="text-sm cursor-pointer">并行工具调用</Label>
+                  <p className="text-xs text-muted-foreground">同一轮响应中的独立工具并发执行，减少串行等待</p>
+                </div>
+              </div>
+              <Switch
+                id="parallel_tool_calls"
+                checked={form.parallel_tool_calls}
+                onCheckedChange={(checked) => setForm({ ...form, parallel_tool_calls: checked })}
               />
             </div>
             {/* 开放给本空间：开启后本空间全体成员可见可用（仅创建者可改/删） */}
