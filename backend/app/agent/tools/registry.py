@@ -20,11 +20,16 @@ _TOOL_ERROR_HINT = "\n\n[Analyze the error above and try a different approach.]"
 class ToolRegistry:
     """工具注册表 - 注册、查找、执行工具"""
 
-    def __init__(self, max_tool_output_chars: int = 16000) -> None:
+    def __init__(
+        self,
+        max_tool_output_chars: int = 16000,
+        output_budgets: dict[str, int] | None = None,
+    ) -> None:
         self._tools: dict[str, BaseTool] = {}
         self._max_tool_output_chars = max_tool_output_chars
+        self._output_budgets = dict(output_budgets or {})
 
-    def register(self, tool: BaseTool) -> None:
+    def register(self, tool: BaseTool, max_output_chars: int | None = None) -> None:
         """注册一个工具实例，以 tool.name 为键存储（first-wins 策略）"""
         if tool.name in self._tools:
             logger.warning(
@@ -33,6 +38,8 @@ class ToolRegistry:
             )
             return
         self._tools[tool.name] = tool
+        if max_output_chars is not None:
+            self._output_budgets[tool.name] = max(1, int(max_output_chars))
 
     def get_function_definitions(self) -> list[dict]:
         """返回 OpenAI function calling 格式的 tools 列表
@@ -98,13 +105,16 @@ class ToolRegistry:
         else:
             result = await tool.execute(args)
 
-        # 截断超长工具输出，防止上下文窗口溢出
-        if result.output and len(result.output) > self._max_tool_output_chars:
+        # 截断超长工具输出，防止上下文窗口溢出。Per-tool budgets keep a
+        # document reader from consuming the same context share as a todo update.
+        budget = self._output_budgets.get(name, self._max_tool_output_chars)
+        if result.output and len(result.output) > budget:
             result = ToolResult(
                 success=result.success,
-                output=truncate_tool_output(result.output, self._max_tool_output_chars),
+                output=truncate_tool_output(result.output, budget),
                 data=result.data,
                 error=result.error,
+                structured_content=result.structured_content,
             )
 
         # 失败时追加 error hint 引导 LLM 换策略
@@ -114,6 +124,7 @@ class ToolRegistry:
                 output=result.output,
                 data=result.data,
                 error=result.error + _TOOL_ERROR_HINT,
+                structured_content=result.structured_content,
             )
 
         return result
@@ -121,3 +132,8 @@ class ToolRegistry:
     def list_tools(self) -> list[str]:
         """返回所有已注册工具的名称列表"""
         return list(self._tools.keys())
+
+    def is_read_only(self, name: str) -> bool:
+        """Whether a tool can safely run concurrently with other reads."""
+        tool = self._tools.get(name)
+        return bool(tool is not None and tool.read_only)

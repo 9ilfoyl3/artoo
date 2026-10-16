@@ -119,6 +119,7 @@ _BUILTIN_PRESETS = [
             "agent_mode": "hybrid",
             "max_iterations": 5,
             "thinking_enabled": False,
+            "parallel_tool_calls": False,
             "temperature": 0.3,
         },
         "is_default": False,
@@ -135,7 +136,15 @@ _BUILTIN_PRESETS = [
             "agent_mode": "agent",
             "max_iterations": 20,
             "thinking_enabled": True,
+            "parallel_tool_calls": True,
             "temperature": 0.7,
+            "allowed_tools": [
+                "search_knowledge",
+                "list_documents",
+                "read_document",
+                "todo_write",
+                "calculate",
+            ],
         },
         "is_default": True,
         "tenant_id": None,
@@ -155,19 +164,29 @@ _BUILTIN_PRESETS = [
 
 _BUILTIN_TOOL_CATALOG: list[dict] = [
     {
-        "name": "knowledge_search",
-        "label": "语义检索",
-        "description": "在所选知识库与会话文件中做向量 + 稀疏混合检索",
+        "name": "search_knowledge",
+        "label": "统一召回",
+        "description": "唯一召回入口，支持 hybrid / semantic / keyword / summary 四种模式",
     },
     {
-        "name": "grep_chunks",
-        "label": "关键词检索",
-        "description": "在主知识库内按关键词精确匹配分块",
+        "name": "list_documents",
+        "label": "文档清单",
+        "description": "列出当前授权知识库与会话文件中的文档，并标记异步摘要状态",
     },
     {
-        "name": "list_knowledge_chunks",
-        "label": "分页浏览",
-        "description": "按原文顺序分页浏览文档分块",
+        "name": "read_document",
+        "label": "文档阅读",
+        "description": "按 doc_id/chunk_id 分页或按 query/regex 精确读取文档",
+    },
+    {
+        "name": "todo_write",
+        "label": "任务清单",
+        "description": "为多步任务维护有界 Todo 规划状态",
+    },
+    {
+        "name": "calculate",
+        "label": "确定性计算",
+        "description": "执行 decimal 四则运算、百分比与舍入，避免模型在推理中进行易错计算",
     },
     {
         "name": "web_search",
@@ -293,6 +312,11 @@ async def _ensure_builtin_presets() -> None:
                 existing.tenant_id = None
                 existing.owner_user_id = None
                 existing.is_shared = True
+                # 内置预设由平台维护，随版本升级合并规范配置。用户自定义预设
+                # 不在此路径，避免静默扩大其工具权限。
+                merged_config = dict(existing.config_json or {})
+                merged_config.update(preset_data["config_json"])
+                existing.config_json = merged_config
 
         await session.flush()
         result = await session.execute(

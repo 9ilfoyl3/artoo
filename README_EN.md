@@ -60,9 +60,10 @@ All AI inference (LLM / Embedding / Rerank / OCR) runs through HTTP calls to ext
 │   EventBus  │  3-tier context management  │  Skills          │
 ├─────────────────────────────────────────────────────────────┤
 │                          Tool Layer                          │
-│  knowledge_search │ grep_chunks │ list_knowledge_chunks      │
-│  read_attachment │ read_skill │ thinking │ web_search        │
-│  final_answer │ MCP Tools                                    │
+│  knowledge_search │ grep_chunks │ list_knowledge_documents   │
+│  read_document │ list_knowledge_chunks │ summarize_documents │
+│  calculate │ read_attachment │ read_skill │ web_search     │
+│  thinking │ MCP Tools                                          │
 ├─────────────────────────────────────────────────────────────┤
 │                      Retrieval Tool Layer                    │
 │  Dense + Sparse + BM25 (+ Graph) → RRF → Rerank → MMR → expand│

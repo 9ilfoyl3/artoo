@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record: the Git blob hash of each side as of the
+# last confirmed-consistent state. Both languages carry equal authority; after
+# editing either side, bring the other along and re-record both hashes with:
+#   git hash-object .agents/notes/implemented/architecture/2026-10-14-generic-kb-agent-data-plane.md .agents/notes/implemented/architecture/2026-10-14-generic-kb-agent-data-plane.zh.md
+2026-10-14-generic-kb-agent-data-plane.md: 4c43575af65add3fb66422c3a3441901a9c22e47
+2026-10-14-generic-kb-agent-data-plane.zh.md: c1ea7bc7c4ab5dcbd57518e5e9cc7416170713da

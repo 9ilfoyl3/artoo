@@ -119,7 +119,7 @@ class HybridRetriever(BaseRetriever):
 
     async def search_with_degraded(
         self, query: str, kb_id: str, top_k: int = 10, expr: str | None = None,
-        tenant_id: str | None = None, **kwargs
+        tenant_id: str | None = None, routes: set[str] | None = None, **kwargs
     ) -> tuple[list[RetrievalResult], bool]:
         """执行混合检索，返回 ``(结果列表, 本次是否路级降级)``。
 
@@ -142,6 +142,10 @@ class HybridRetriever(BaseRetriever):
             tenant_id: 显式租户 ID（H5）。传入非 None 时据此读该租户检索配置；
                 未传（None）时回退 ``_current_tenant_id()`` contextvar，保证既有调用点行为不变。
                 流式响应中 contextvar 已被依赖 reset，必须由 chat 端点显式下传以免静默降级。
+            routes: Optional subset of retrieval routes. ``None`` preserves the
+                historical dense+sparse+bm25(+graph) behavior. The unified
+                ``search_knowledge`` tool uses this to expose semantic and
+                keyword modes without duplicating retriever implementations.
             skip_rerank: 跳过 rerank 和父块扩展，仅返回 RRF 融合结果
 
         Returns:
@@ -157,27 +161,62 @@ class HybridRetriever(BaseRetriever):
         ttl = await self._platform_store.get_load_cache_ttl()
         # 每路召回数取自配置（默认 128），确保候选池足够大
         recall_k = config.recall_k
+        selected_routes = set(routes or {"dense", "sparse", "bm25", "graph"})
 
         # 1. 并行执行三路检索
-        tasks = [
-            self.vector_retriever.search(query, kb_id, top_k=recall_k, expr=expr, ef=config.hnsw_ef, load_cache_ttl=ttl, **kwargs),
-            self.sparse_retriever.search(query, kb_id, top_k=recall_k, expr=expr, load_cache_ttl=ttl, **kwargs),
-        ]
+        tasks = []
+        route_names: list[str] = []
+        if "dense" in selected_routes:
+            tasks.append(
+                self.vector_retriever.search(
+                    query,
+                    kb_id,
+                    top_k=recall_k,
+                    expr=expr,
+                    ef=config.hnsw_ef,
+                    load_cache_ttl=ttl,
+                    **kwargs,
+                )
+            )
+            route_names.append("dense")
+        if "sparse" in selected_routes:
+            tasks.append(
+                self.sparse_retriever.search(
+                    query,
+                    kb_id,
+                    top_k=recall_k,
+                    expr=expr,
+                    load_cache_ttl=ttl,
+                    **kwargs,
+                )
+            )
+            route_names.append("sparse")
         # BM25 是可选的（兼容旧 schema collection）
-        has_bm25 = self.bm25_retriever is not None
+        has_bm25 = self.bm25_retriever is not None and "bm25" in selected_routes
         if has_bm25:
-            tasks.append(self.bm25_retriever.search(query, kb_id, top_k=recall_k, expr=expr, load_cache_ttl=ttl, **kwargs))
+            tasks.append(
+                self.bm25_retriever.search(
+                    query,
+                    kb_id,
+                    top_k=recall_k,
+                    expr=expr,
+                    load_cache_ttl=ttl,
+                    **kwargs,
+                )
+            )
+            route_names.append("bm25")
 
         # 第四路：图谱召回（可选，design.md 4.5）。仅当注入了 graph_retriever 时追加该路；
         # 未注入（None）→ tasks 与下方 RRF 输入与未引入本功能时逐字节一致（Property 8，零回归）。
         # KB 未开启图谱 / store 不可用时由 GraphRetriever.search 自身早退返回 []（自降级），
         # 空列表并入 RRF 不改变其余路名次（标准 RRF 仅用名次累加，空路无贡献）。
         # 图查询异常 → 经下方 _safe 路级降级为空，其余路不受影响（Req 7.3）。
-        has_graph = self.graph_retriever is not None
+        has_graph = self.graph_retriever is not None and "graph" in selected_routes
         graph_idx = -1
         if has_graph:
             graph_idx = len(tasks)
             tasks.append(self.graph_retriever.search(query, kb_id, top_k=recall_k, expr=expr, **kwargs))
+            route_names.append("graph")
 
         # 三路容错（H2）：return_exceptions=True 收集各路结果 / 异常，逐路经 _safe 包装。
         # 任一路抛异常 → 该路降级为空、其余路照常融合，与 search_with_trace() 行为一致
@@ -208,11 +247,16 @@ class HybridRetriever(BaseRetriever):
             return r
 
         # 索引映射严格对齐 tasks 构建顺序：dense=0 / sparse=1 / bm25=2 / graph=graph_idx。
-        dense_results = _safe(0, "dense")
-        sparse_results = _safe(1, "sparse")
-        bm25_results = _safe(2, "bm25") if has_bm25 else []
+        def _route_items(name: str) -> list[RetrievalResult]:
+            if name not in route_names:
+                return []
+            return _safe(route_names.index(name), name)
+
+        dense_results = _route_items("dense")
+        sparse_results = _route_items("sparse")
+        bm25_results = _route_items("bm25")
         # 图谱召回（第四路）：未注入时为空，不参与融合（Property 8 零回归）。
-        graph_results = _safe(graph_idx, "graph") if has_graph else []
+        graph_results = _route_items("graph")
 
         # 三路全失败（确有降级且 dense/sparse/bm25 融合输入全空）→ 抛 RuntimeError 交上层降级，
         # 区别于"正常无结果"返回空：后者 route_degraded=False 不抛错（Req H2-4）。

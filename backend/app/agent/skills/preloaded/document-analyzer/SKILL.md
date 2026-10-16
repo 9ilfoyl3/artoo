@@ -12,10 +12,11 @@ description: 文档深度分析技能。擅长对长文档进行结构化分析�
 - 对比多个文档的异同
 
 ## 使用方法
-1. 先用 knowledge_search 找到目标文档
-2. 用 list_knowledge_chunks 逐页阅读完整内容
-3. 对完整内容进行结构化分析
-4. 输出分析结果
+1. 整库或多文档分析先调用 `list_documents` 获取权威清单和摘要状态
+2. 多文档先用 `search_knowledge(mode="summary")` 读取持久化摘要；只有摘要缺失或需要原文时再用 `read_document`
+3. 主题定位用 `search_knowledge(mode="hybrid")`，精确术语用 `mode="keyword"`
+4. 对完整内容进行结构化分析，并报告未覆盖文档
+5. 输出分析结果
 
 ## 输出格式
 - 使用 Markdown 结构化输出

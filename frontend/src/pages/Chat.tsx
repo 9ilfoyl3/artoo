@@ -8,6 +8,7 @@ import MessageBubble from '@/components/chat/MessageBubble'
 import type { Message, Reference, ContentSegment } from '@/components/chat/MessageBubble'
 import ChatInput from '@/components/chat/ChatInput'
 import ChatAnchorRail, { type QueryAnchor } from '@/components/chat/ChatAnchorRail'
+import { normalizeTaskList, type TaskListItem } from '@/components/chat/TaskList'
 import type { PendingSessionFile } from '@/components/chat/SessionFileList'
 import { isImageFilename } from '@/components/chat/SessionFileList'
 import SuggestedQuestions from '@/components/chat/SuggestedQuestions'
@@ -19,6 +20,7 @@ import { useConfirm } from '@/lib/confirm-context'
 import { authHeaders, handleUnauthorized } from '@/lib/auth'
 import { useArtifactStore } from '@/stores/artifactStore'
 import { cn } from '@/lib/utils'
+import { isStructuredToolContent } from '@/lib/structuredResult'
 
 function browserTimezone(): string | undefined {
   try {
@@ -49,6 +51,7 @@ function Chat() {
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
   const [isStreaming, setIsStreaming] = useState(false)
+  const [todos, setTodos] = useState<TaskListItem[]>([])
   const [isLoadingMessages, setIsLoadingMessages] = useState(false)
   const [selectedModel, setSelectedModel] = useState('')
   const [selectedPreset, setSelectedPreset] = useState('')
@@ -107,6 +110,8 @@ function Chat() {
   // 无论用户当前看的是哪个会话，流式回调都更新这里；仅当该会话在前台时才同步到 messages 状态。
   // 切回该会话时用它恢复，实现会话级输出隔离。
   const streamRef = useRef<{ sessionId: string; messages: Message[] } | null>(null)
+  // 每个会话最近一次 todo_update 状态；后台流式切换回来时直接恢复。
+  const todosBySessionRef = useRef<Record<string, TaskListItem[]>>({})
   // 正在流式输出的会话 id（用于判断「当前查看的会话是否正在流式」，控制光标/重试按钮）。
   const streamingSessionRef = useRef<string | null>(null)
   // 当前在飞的问答流 AbortController：点「停止」时 abort，触发后端 SSE 取消 + 落库部分答案。
@@ -384,6 +389,7 @@ function Chat() {
     if (currentSessionId === null) {
       setMessages([])
       setInput('')
+      setTodos([])
       setPendingFiles([])
       setExpandedRefs(new Set())
       setContextUsage({ current: 0, max: 0 })
@@ -401,6 +407,7 @@ function Chat() {
       streamingSessionRef.current === currentSessionId
     ) {
       setMessages(streamRef.current.messages)
+      setTodos(todosBySessionRef.current[currentSessionId] || [])
       setIsStreaming(true)
       setIsLoadingMessages(false)
       return
@@ -416,6 +423,17 @@ function Chat() {
       setContextUsage({ current: 0, max: 0 })
       try {
         const msgs = await sessionApi.getMessages(currentSessionId!)
+        let restoredTodos: TaskListItem[] = []
+        for (const msg of msgs) {
+          if (!msg.agent_steps || !Array.isArray(msg.agent_steps)) continue
+          for (const step of msg.agent_steps) {
+            if (step.type === 'todo_update') {
+              restoredTodos = normalizeTaskList(step.todos)
+            }
+          }
+        }
+        todosBySessionRef.current[currentSessionId!] = restoredTodos
+        setTodos(restoredTodos)
         setMessages(msgs.map((m) => {
           const base: Message = {
             role: m.role as 'user' | 'assistant',
@@ -449,6 +467,22 @@ function Chat() {
                     toolArgs: (step.arguments as Record<string, unknown>) || undefined,
                     success: undefined,
                   })
+                } else if (step.type === 'tool_progress') {
+                  const existing = segments.find(
+                    (seg) => seg.type === 'tool_call' && seg.toolCallId === step.tool_call_id
+                  )
+                  if (existing) {
+                    existing.progress = {
+                      phase: step.phase as 'start' | 'heartbeat' | 'document' | 'complete',
+                      completed: Number(step.completed || 0),
+                      total: Number(step.total || 0),
+                      filename: typeof step.filename === 'string' ? step.filename : undefined,
+                      success: typeof step.success === 'boolean' ? step.success : undefined,
+                      cache_hit: typeof step.cache_hit === 'boolean' ? step.cache_hit : undefined,
+                      elapsed_ms: typeof step.elapsed_ms === 'number' ? step.elapsed_ms : undefined,
+                      message: typeof step.message === 'string' ? step.message : undefined,
+                    }
+                  }
                 } else if (step.type === 'tool_result') {
                   // 更新匹配的 tool_call 段落
                   const existing = segments.find(
@@ -458,6 +492,10 @@ function Chat() {
                     existing.success = step.success as boolean
                     existing.durationMs = step.duration_ms as number | undefined
                     existing.files = ((step as Record<string, unknown>).files as ContentSegment['files']) || undefined
+                    const structuredContent = (step as Record<string, unknown>).structured_content
+                    existing.structuredContent = isStructuredToolContent(structuredContent)
+                      ? structuredContent
+                      : undefined
                   }
                 } else if (step.type === 'text_delta' || step.type === 'final_answer') {
                   if (step.content) {
@@ -616,6 +654,10 @@ function Chat() {
     const baseMessages = [...messagesRef.current, userMessage, assistantMessage]
     streamRef.current = { sessionId: streamSessionId, messages: baseMessages }
     streamingSessionRef.current = streamSessionId
+    todosBySessionRef.current[streamSessionId] = []
+    if (currentSessionIdRef.current === streamSessionId) {
+      setTodos([])
+    }
     setMessages(baseMessages)
     // 发起新一轮：恢复粘附底部，并把侧边锚点立即定位到这条新提问
     stickToBottomRef.current = true
@@ -638,6 +680,13 @@ function Chat() {
     const updateUsage = (usage: { current: number; max: number }) => {
       if (currentSessionIdRef.current === streamSessionId) {
         setContextUsage(usage)
+      }
+    }
+    // 会话隔离的 Todo 更新器：后台流式时只写会话缓存，切回该会话时恢复。
+    const updateTodos = (nextTodos: TaskListItem[]) => {
+      todosBySessionRef.current[streamSessionId] = nextTodos
+      if (currentSessionIdRef.current === streamSessionId) {
+        setTodos(nextTodos)
       }
     }
 
@@ -789,15 +838,22 @@ function Chat() {
                     break
                   }
 
-                  // 工具调用结果：更新匹配的 tool_call 段落
-                  case 'tool_result': {
+                  // 长工具进度：只更新匹配的 tool_call 段落，不新增步骤行
+                  case 'tool_progress': {
                     segments = segments.map((seg) =>
                       seg.type === 'tool_call' && seg.toolCallId === parsed.tool_call_id
                         ? {
                             ...seg,
-                            success: parsed.success,
-                            durationMs: parsed.duration_ms,
-                            files: parsed.files,
+                            progress: {
+                              phase: parsed.phase as 'start' | 'heartbeat' | 'document' | 'complete',
+                              completed: Number(parsed.completed || 0),
+                              total: Number(parsed.total || 0),
+                              filename: typeof parsed.filename === 'string' ? parsed.filename : undefined,
+                              success: typeof parsed.success === 'boolean' ? parsed.success : undefined,
+                              cache_hit: typeof parsed.cache_hit === 'boolean' ? parsed.cache_hit : undefined,
+                              elapsed_ms: typeof parsed.elapsed_ms === 'number' ? parsed.elapsed_ms : undefined,
+                              message: typeof parsed.message === 'string' ? parsed.message : undefined,
+                            },
                           }
                         : seg
                     )
@@ -811,6 +867,40 @@ function Chat() {
                       }
                       return updated
                     })
+                    break
+                  }
+
+                  case 'tool_result': {
+                    segments = segments.map((seg) =>
+                      seg.type === 'tool_call' && seg.toolCallId === parsed.tool_call_id
+                        ? {
+                            ...seg,
+                            success: parsed.success,
+                            durationMs: parsed.duration_ms,
+                            files: parsed.files,
+                            structuredContent: isStructuredToolContent(parsed.structured_content)
+                              ? parsed.structured_content
+                              : undefined,
+                          }
+                        : seg
+                    )
+                    updateStream((prev) => {
+                      const updated = [...prev]
+                      updated[updated.length - 1] = {
+                        role: 'assistant',
+                        content: fullContent,
+                        references,
+                        segments,
+                      }
+                      return updated
+                    })
+                    break
+                  }
+
+                  // Codex-style task state: replace the visible checklist as the
+                  // model advances or completes steps.
+                  case 'todo_update': {
+                    updateTodos(normalizeTaskList(parsed.todos))
                     break
                   }
 
@@ -1303,6 +1393,7 @@ function Chat() {
     onDismissPendingSessionFile: handleDismissPendingSessionFile,
     sessionImagePreviewUrls: imagePreviewUrls,
     sessionId: currentSessionId,
+    todos,
   }
 
   // 空态：标题 + 提问示例气泡 + 居中输入框

@@ -2,5 +2,5 @@
 # last confirmed-consistent state. Both languages carry equal authority; after
 # editing either side, bring the other along and re-record both hashes with:
 #   git hash-object .agents/notes/implemented/architecture/2026-09-03-typed-agent-response-channels.md .agents/notes/implemented/architecture/2026-09-03-typed-agent-response-channels.zh.md
-2026-09-03-typed-agent-response-channels.md: 6344e51f99f9bd4e2ab4c59483b533b7cc35d764
-2026-09-03-typed-agent-response-channels.zh.md: 0d5fb1ad108c51edd8e8579e086222a71ae02fad
+2026-09-03-typed-agent-response-channels.md: b20d66e24732b13e332fcd48fa9f8e4940151529
+2026-09-03-typed-agent-response-channels.zh.md: 5a26d6a6b5e16d4450cafb3fb3031141e1010d15

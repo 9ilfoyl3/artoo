@@ -76,7 +76,7 @@ function KbSelector({ knowledgeBases, selectedKbIds, onToggle }: KbSelectorProps
           <ChevronDown className="h-3 w-3" />
         </button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent side="top" align="start">
+      <DropdownMenuContent side="bottom" align="start" className="max-h-96 overflow-y-auto">
         {knowledgeBases.length === 0 ? (
           <div className="px-3 py-2 text-xs text-muted-foreground">暂无可用知识库</div>
         ) : (

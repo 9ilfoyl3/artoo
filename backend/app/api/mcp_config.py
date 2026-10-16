@@ -39,6 +39,10 @@ from app.agent.tools.mcp_client import (
     MCPServerSpec,
     spec_from_config,
 )
+from app.agent.tools.structured_result import (
+    StructuredResultValidationError,
+    normalize_output_schema,
+)
 from app.api.deps import require_platform
 from app.auth.secret_box import encrypt, mask
 from app.mcp.url_guard import UnsafeMcpUrlError, validate_mcp_url
@@ -101,6 +105,8 @@ class MCPToolMeta(BaseModel):
     """远端 MCP server 暴露的单个工具元信息"""
     name: str
     description: str = ""
+    # 标准 MCP 可选声明；仅用于观测，实际调用校验在 MCPToolWrapper 执行期完成。
+    output_schema: Optional[dict] = None
 
 
 class MCPTestResponse(BaseModel):
@@ -165,6 +171,23 @@ def _normalize_url(url: str) -> str:
         raise HTTPException(status_code=422, detail=str(e)) from e
 
 
+def _tool_meta(tool: dict) -> MCPToolMeta | None:
+    name = tool.get("name")
+    if not name:
+        return None
+    output_schema = None
+    if tool.get("outputSchema") is not None:
+        try:
+            output_schema = normalize_output_schema(tool.get("outputSchema"))
+        except StructuredResultValidationError as exc:
+            logger.warning("[MCP] ignored invalid outputSchema for tool '%s': %s", name, exc)
+    return MCPToolMeta(
+        name=name,
+        description=tool.get("description", ""),
+        output_schema=output_schema,
+    )
+
+
 def _validate_enums(transport: str | None, auth_type: str | None) -> None:
     if transport is not None and transport not in _VALID_TRANSPORTS:
         raise HTTPException(
@@ -212,11 +235,7 @@ async def _perform_mcp_test(spec: MCPServerSpec) -> MCPTestResponse:
     return MCPTestResponse(
         reachable=True,
         tool_count=len(tools),
-        tools=[
-            MCPToolMeta(name=t.get("name", ""), description=t.get("description", ""))
-            for t in tools
-            if t.get("name")
-        ],
+        tools=[meta for tool in tools if (meta := _tool_meta(tool)) is not None],
         protocol=client.last_transport,
     )
 
@@ -346,8 +365,4 @@ async def list_mcp_tools(config_id: str, db: AsyncSession = Depends(get_db)):
     except Exception as e:
         logger.warning("[MCP] Fetch tools failed for %s: %s", config.url, e)
         raise HTTPException(status_code=400, detail=f"获取工具列表失败: {e}")
-    return [
-        MCPToolMeta(name=t.get("name", ""), description=t.get("description", ""))
-        for t in tools
-        if t.get("name")
-    ]
+    return [meta for tool in tools if (meta := _tool_meta(tool)) is not None]

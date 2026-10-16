@@ -21,7 +21,7 @@ from app.api.deps import require_authenticated
 from app.api.errors import CrossTenantError, NotFoundError, PermissionDeniedError, ValidationInputError
 from app.auth.identity import IdentityContext
 from app.config import get_settings
-from app.schema.db import ChatSession, ChatMessageRecord
+from app.schema.db import AgentCompactionCheckpoint, ChatSession, ChatMessageRecord
 from app.session_upload.service import get_session_upload_service
 from app.storage.database import async_session
 
@@ -227,6 +227,11 @@ async def delete_session(
     """
     async with async_session() as session:
         chat_session = await _get_owned_session(session, session_id, identity)
+        await session.execute(
+            delete(AgentCompactionCheckpoint).where(
+                AgentCompactionCheckpoint.session_id == session_id
+            )
+        )
         await session.delete(chat_session)
         await session.commit()
 

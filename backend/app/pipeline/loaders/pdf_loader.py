@@ -65,6 +65,7 @@ class PdfLoader(BaseLoader):
         pages_text: list[str] = []
         page_blocks: list[list[dict]] = []
         page_heights: list[float] = []
+        page_has_usable_text: list[bool] = []
         images: list[EmbeddedImage] = []
         seen_hashes: set[str] = set()  # 用于去重
         total_images_extracted = 0
@@ -79,6 +80,7 @@ class PdfLoader(BaseLoader):
             page_blocks.append(blocks)
             page_heights.append(float(page.rect.height))
             has_usable_text_layer = self._has_usable_text_layer(page, blocks)
+            page_has_usable_text.append(has_usable_text_layer)
 
             # 达到图片上限后不再提取
             if total_images_extracted >= _MAX_IMAGES_PER_DOC:
@@ -117,6 +119,7 @@ class PdfLoader(BaseLoader):
             page_texts=pages_text,
             page_blocks=page_blocks,
             page_heights=page_heights,
+            page_has_usable_text=page_has_usable_text,
         )
 
     @staticmethod

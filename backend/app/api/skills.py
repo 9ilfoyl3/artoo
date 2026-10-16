@@ -37,7 +37,8 @@ _INSTRUCTIONS_MAX = 20000
 _RESERVED_NAMES = {
     "system", "default", "internal", "core", "base", "root", "admin",
     "final_answer", "thinking", "read_skill", "read_attachment",
-    "knowledge_search", "grep_chunks", "list_knowledge_chunks", "web_search",
+    "search_knowledge", "list_documents", "read_document", "todo_write",
+    "web_search",
 }
 
 # 名称字符集：汉字 / 英文字母 / 数字 / 空格 / 连字符 / 下划线（与 WeKnora 一致，禁特殊符号）。
@@ -190,8 +191,8 @@ async def generate_skill(
         "}\n\n"
         "instructions 写作要求：\n"
         "1. 聚焦该技能特有的方法论：适用场景、工作步骤、输出格式、注意事项。\n"
-        "2. 智能体已有的检索工具是 knowledge_search（语义检索）、grep_chunks（关键词检索）、"
-        "list_knowledge_chunks（精读原文）。"
+        "2. 智能体唯一的召回工具是 search_knowledge，支持 hybrid / semantic / "
+        "keyword / summary 模式；文档读取使用 read_document。"
         "可以引用这些工具来编排步骤，但不要复述它们的底层调用规则、引用格式、语言要求"
         "——这些已由核心提示词负责。\n"
         "3. 不要编造智能体没有的能力（如执行脚本、联网下载、调用外部 API）。\n"

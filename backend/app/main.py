@@ -78,6 +78,12 @@ async def lifespan(app: FastAPI):
     # 初始化 TaskQueue（仅用于入队，Worker 在独立进程中运行）
     await _init_task_queue(app)
 
+    # Durable summary queue: API only needs the enqueue side; generation runs in
+    # the worker process.
+    from app.summary.service import initialize_document_summary_queue
+
+    await initialize_document_summary_queue(get_settings().redis_url)
+
     # 初始化会话文件异步上传基础设施（EventHub + SessionUploadEventBus + 订阅循环 + 入队队列）
     await _init_session_upload_infra(app)
 
@@ -164,6 +170,10 @@ async def lifespan(app: FastAPI):
 
     # 关闭 TaskQueue 连接
     await _close_task_queue(app)
+
+    from app.summary.service import close_document_summary_queue
+
+    await close_document_summary_queue()
 
     # 关闭会话文件异步上传基础设施（停订阅循环、关队列连接、清理单例）
     await _close_session_upload_infra(app)

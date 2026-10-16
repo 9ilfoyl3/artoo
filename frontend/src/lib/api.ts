@@ -1,6 +1,7 @@
 // API 客户端：统一请求封装
 
 import { authHeaders, handleUnauthorized } from './auth'
+import type { StructuredToolContent } from './structuredResult'
 
 const BASE_URL = '/api'
 
@@ -195,6 +196,19 @@ export interface DocumentEvent {
   entity_names: string[]
 }
 
+export interface DocumentSummaryPreview {
+  doc_id: string
+  status: 'missing' | 'pending' | 'processing' | 'completed' | 'failed' | string
+  summary: string | null
+  gist: string | null
+  topics: string[]
+  doc_type: string | null
+  typical_question: string | null
+  content_version: string | null
+  chunk_count: number
+  generated_at: string | null
+}
+
 // 文档相关接口
 export const documentApi = {
   list: (
@@ -266,6 +280,9 @@ export const documentApi = {
     }>
   },
   get: (id: string) => request<unknown>(`/documents/${id}`),
+  // 只读摘要制品：后端不会在此接口触发生成，生成始终由独立 worker lane 异步完成。
+  summary: (id: string) =>
+    request<DocumentSummaryPreview>(`/documents/${id}/summary`),
   delete: (id: string) =>
     request<void>(`/documents/${id}`, { method: 'DELETE' }),
   batchDelete: (docIds: string[]) =>
@@ -770,6 +787,7 @@ export interface AgentPresetItem {
     max_iterations?: number
     temperature?: number
     thinking_enabled?: boolean
+    parallel_tool_calls?: boolean
     allowed_tools?: string[]
     custom_instructions?: string
   } | null
@@ -885,6 +903,17 @@ export interface SessionMessageItem {
     arguments?: Record<string, unknown>
     success: any
     duration_ms: number | undefined
+    structured_content?: StructuredToolContent
+    phase?: string
+    completed?: number
+    total?: number
+    filename?: string
+    cache_hit?: boolean
+    elapsed_ms?: number
+    message?: string
+    first_answer_ms?: number
+    todos?: { content: string; status: 'pending' | 'in_progress' | 'completed' }[]
+    count?: number
     step: string
     detail: string
     max_context_tokens?: number

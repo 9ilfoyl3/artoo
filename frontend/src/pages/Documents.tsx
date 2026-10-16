@@ -24,6 +24,7 @@ import {
   Network,
   Link2,
   X,
+  NotebookText,
 } from 'lucide-react'
 import { documentApi, knowledgeBaseApi, folderApi, systemApi } from '@/lib/api'
 import type { PageResult, KBCapacity } from '@/lib/api'
@@ -55,6 +56,7 @@ import FolderBreadcrumb from '@/components/documents/FolderBreadcrumb'
 import NewFolderDialog from '@/components/documents/NewFolderDialog'
 import RenameDialog from '@/components/documents/RenameDialog'
 import ChunkViewer from '@/components/documents/ChunkViewer'
+import DocumentSummaryPreview from '@/components/documents/DocumentSummaryPreview'
 import KBCapacityBar from '@/components/KBCapacityBar'
 import DocumentGridSkeleton from '@/components/skeletons/DocumentGridSkeleton'
 import TableSkeleton from '@/components/skeletons/TableSkeleton'
@@ -98,6 +100,35 @@ function ToolbarTip({
   )
 }
 
+function DocumentSummaryHover({
+  doc,
+  children,
+}: {
+  doc: MergedFile
+  children: React.ReactNode
+}) {
+  return (
+    <TooltipProvider delayDuration={1000} skipDelayDuration={250}>
+      <Tooltip>
+        <TooltipTrigger asChild>{children}</TooltipTrigger>
+        <TooltipContent
+          side="right"
+          align="start"
+          sideOffset={8}
+          collisionPadding={12}
+          className="w-[300px] overflow-hidden rounded-xl border bg-popover p-0 shadow-xl"
+        >
+          <DocumentSummaryPreview
+            docId={doc.id}
+            filename={doc.filename}
+            uploadedAt={doc.created_at}
+          />
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  )
+}
+
 // 文档管理页面 - Finder 风格
 function Documents() {
   const { id: kbId } = useParams<{ id: string }>()
@@ -118,6 +149,7 @@ function Documents() {
   const [showNewFolder, setShowNewFolder] = useState(false)
   const [renamingFolder, setRenamingFolder] = useState<FolderData | null>(null)
   const [viewingChunks, setViewingChunks] = useState<string | null>(null)
+  const [summaryDoc, setSummaryDoc] = useState<MergedFile | null>(null)
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid')
 
   // 批量选择状态
@@ -629,6 +661,7 @@ function Documents() {
       progress: doc.progress ?? 0,
       progress_message: doc.progress_message ?? null,
       isLocal: false,
+      created_at: doc.created_at,
     })),
     ...uploadingFiles
       .filter((f) => !confirmedLocalIds.has(f.id))
@@ -642,6 +675,7 @@ function Documents() {
         progress: 0,
         progress_message: null,
         isLocal: true,
+        created_at: null,
       })),
   ]
 
@@ -956,37 +990,39 @@ function Documents() {
               return (
                 <ContextMenu key={doc.id}>
                   <ContextMenuTrigger>
-                    <div
-                      className="relative"
-                      onClick={(e) => {
-                        if (selectionMode) {
-                          e.stopPropagation()
-                          toggleDocSelection(doc.id)
-                        }
-                      }}
-                    >
-                      {selectionMode && (
-                        <div className="absolute -top-1 -left-1 z-10">
-                          <div className={`h-5 w-5 rounded border-2 flex items-center justify-center cursor-pointer transition-colors ${
-                            selectedIds.has(doc.id)
-                              ? 'bg-primary border-primary text-primary-foreground'
-                              : 'border-muted-foreground/50 bg-background/80'
-                          }`}>
-                            {selectedIds.has(doc.id) && (
-                              <svg className="h-3 w-3" viewBox="0 0 12 12" fill="none">
-                                <path d="M2 6l3 3 5-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-                              </svg>
-                            )}
+                    <DocumentSummaryHover doc={doc}>
+                      <div
+                        className="relative"
+                        onClick={(e) => {
+                          if (selectionMode) {
+                            e.stopPropagation()
+                            toggleDocSelection(doc.id)
+                          }
+                        }}
+                      >
+                        {selectionMode && (
+                          <div className="absolute -top-1 -left-1 z-10">
+                            <div className={`h-5 w-5 rounded border-2 flex items-center justify-center cursor-pointer transition-colors ${
+                              selectedIds.has(doc.id)
+                                ? 'bg-primary border-primary text-primary-foreground'
+                                : 'border-muted-foreground/50 bg-background/80'
+                            }`}>
+                              {selectedIds.has(doc.id) && (
+                                <svg className="h-3 w-3" viewBox="0 0 12 12" fill="none">
+                                  <path d="M2 6l3 3 5-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                                </svg>
+                              )}
+                            </div>
                           </div>
-                        </div>
-                      )}
-                      <FileItem
-                        doc={doc}
-                        isSelected={selectionMode ? selectedIds.has(doc.id) : selectedId === doc.id}
-                        onSelect={selectionMode ? toggleDocSelection : handleSelectFile}
-                        onRetry={canWrite ? (id) => retryMutation.mutate(id) : undefined}
-                      />
-                    </div>
+                        )}
+                        <FileItem
+                          doc={doc}
+                          isSelected={selectionMode ? selectedIds.has(doc.id) : selectedId === doc.id}
+                          onSelect={selectionMode ? toggleDocSelection : handleSelectFile}
+                          onRetry={canWrite ? (id) => retryMutation.mutate(id) : undefined}
+                        />
+                      </div>
+                    </DocumentSummaryHover>
                   </ContextMenuTrigger>
                   <ContextMenuContent className="w-48">
                     <ContextMenuItem
@@ -1002,6 +1038,10 @@ function Documents() {
                     >
                       <Eye className="h-4 w-4 mr-2" />
                       查看切片
+                    </ContextMenuItem>
+                    <ContextMenuItem onClick={() => setSummaryDoc(doc)}>
+                      <NotebookText className="h-4 w-4 mr-2" />
+                      摘要预览
                     </ContextMenuItem>
                     <ContextMenuItem
                       onClick={() => {
@@ -1138,10 +1178,19 @@ function Documents() {
                       </td>
                     )}
                     <td className="px-4 py-2.5">
-                      <div className="flex items-center gap-2">
-                        <FileText className="h-4 w-4 text-muted-foreground" />
-                        <span className="font-medium truncate max-w-[200px]">{doc.filename}</span>
-                      </div>
+                      {doc.isLocal ? (
+                        <div className="flex items-center gap-2">
+                          <FileText className="h-4 w-4 text-muted-foreground" />
+                          <span className="font-medium truncate max-w-[200px]">{doc.filename}</span>
+                        </div>
+                      ) : (
+                        <DocumentSummaryHover doc={doc}>
+                          <div className="flex w-fit items-center gap-2">
+                            <FileText className="h-4 w-4 text-muted-foreground" />
+                            <span className="font-medium truncate max-w-[200px]">{doc.filename}</span>
+                          </div>
+                        </DocumentSummaryHover>
+                      )}
                     </td>
                     <td className="px-4 py-2.5 text-muted-foreground hidden md:table-cell">{formatSize(doc.file_size)}</td>
                     <td className="px-4 py-2.5 hidden lg:table-cell">
@@ -1273,6 +1322,27 @@ function Documents() {
 
       {/* 切片查看器 */}
       <ChunkViewer documentId={viewingChunks} onClose={() => setViewingChunks(null)} />
+
+      {/* 摘要预览：与悬浮卡片复用同一只读组件；内容无可聚焦元素，
+          阻止打开时自动聚焦到右上角关闭按钮 */}
+      <Dialog open={!!summaryDoc} onOpenChange={(open) => { if (!open) setSummaryDoc(null) }}>
+        <DialogContent
+          className="max-w-md overflow-hidden p-0"
+          onOpenAutoFocus={(e) => e.preventDefault()}
+        >
+          <DialogHeader className="sr-only">
+            <DialogTitle>摘要预览</DialogTitle>
+            <DialogDescription>查看文档的异步摘要制品</DialogDescription>
+          </DialogHeader>
+          {summaryDoc && (
+            <DocumentSummaryPreview
+              docId={summaryDoc.id}
+              filename={summaryDoc.filename}
+              uploadedAt={summaryDoc.created_at}
+            />
+          )}
+        </DialogContent>
+      </Dialog>
 
       {/* 文件夹上传确认对话框 */}
       <Dialog open={folderUploadDialog} onOpenChange={(open) => { if (!open) { setFolderUploadDialog(false); setFolderValidation(null) } }}>

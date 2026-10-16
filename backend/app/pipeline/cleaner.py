@@ -147,10 +147,16 @@ class TextCleaner:
         # Step 1: bbox 过滤 - 如果有 page_blocks，过滤边缘短文本后重建文本
         if page_blocks:
             filtered_blocks = self._filter_by_bbox(page_blocks, page_heights)
-            # 从过滤后的 blocks 重建文本
+            # 从过滤后的 blocks 重建文本；没有 block 的页（例如已由整页 OCR
+            # 替换的页面）保留原始页文本，避免被重建为空。
             page_texts_rebuilt = []
-            for page in filtered_blocks:
-                page_text = "\n".join(block["text"] for block in page)
+            for page_idx, page in enumerate(filtered_blocks):
+                if page:
+                    page_text = "\n".join(block["text"] for block in page)
+                elif page_texts and page_idx < len(page_texts):
+                    page_text = page_texts[page_idx]
+                else:
+                    page_text = ""
                 page_texts_rebuilt.append(page_text)
             result = "\n".join(page_texts_rebuilt)
             # 使用重建后的 page_texts 进行后续处理

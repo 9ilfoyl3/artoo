@@ -28,11 +28,13 @@ from app.agent.engine import AgentEngine
 from app.agent.events import AgentEvent, EventBus, EventType
 from app.agent.state import AgentState
 from app.agent.tools.base import ToolContext
-from app.agent.tools.grep_chunks import GrepChunksTool
-from app.agent.tools.knowledge_search import KnowledgeSearchTool, SearchTarget
-from app.agent.tools.list_chunks import ListKnowledgeChunksTool
+from app.agent.tools.calculator import CalculateTool
+from app.agent.tools.list_documents import ListDocumentsTool
+from app.agent.tools.read_document import ReadDocumentTool
 from app.agent.tools.read_attachment import ReadAttachmentTool
 from app.agent.tools.read_skill import ReadSkillTool
+from app.agent.tools.search_knowledge import SearchKnowledgeTool, SearchTarget
+from app.agent.tools.todo import TodoWriteTool
 from app.agent.tools.web_search import WebSearchTool
 from app.agent.tools.registry import ToolRegistry
 from app.agent.tools.mcp_client import get_mcp_tools
@@ -896,7 +898,10 @@ def _agent_event_to_sse(event: AgentEvent) -> dict | None:
     {"type": "reasoning_delta", "content": "...", "iteration": 0}
     {"type": "text_delta", "content": "...", "iteration": 0}
     {"type": "tool_call", "tool_name": "...", "tool_call_id": "...", "iteration": 0}
+    {"type": "tool_progress", "tool_call_id": "...", "completed": 4, "total": 20}
     {"type": "tool_result", "tool_call_id": "...", "tool_name": "...", "success": true, "duration_ms": 350}
+    # MCP structuredContent 合法时额外带：
+    {"type": "tool_result", ..., "structured_content": {"kind": "...", "data": {}}}
     {"type": "turn_end", "finish_reason": "stop"}
     """
     if event.type == EventType.REASONING_DELTA:
@@ -921,8 +926,28 @@ def _agent_event_to_sse(event: AgentEvent) -> dict | None:
             "arguments": event.data.get("arguments", {}),
             "iteration": event.data.get("iteration", 0),
         }
+    elif event.type == EventType.TOOL_PROGRESS:
+        data = {
+            "type": "tool_progress",
+            "tool_call_id": event.data.get("tool_call_id", ""),
+            "tool_name": event.data.get("tool_name", ""),
+            "iteration": event.data.get("iteration", 0),
+            "elapsed_ms": event.data.get("elapsed_ms", 0),
+        }
+        for key in (
+            "phase",
+            "completed",
+            "total",
+            "filename",
+            "success",
+            "cache_hit",
+            "message",
+        ):
+            if key in event.data:
+                data[key] = event.data[key]
+        return data
     elif event.type == EventType.TOOL_RESULT:
-        return {
+        sse_data = {
             "type": "tool_result",
             "tool_call_id": event.data.get("tool_call_id", ""),
             "tool_name": event.data.get("tool_name", ""),
@@ -931,6 +956,24 @@ def _agent_event_to_sse(event: AgentEvent) -> dict | None:
             # 本次工具读到的文件（检索类工具带出 doc_id→文件名/来源），供前端在步骤行内联
             # 展示可点击预览的文件。落库进 agent_steps，历史回放可还原。
             "files": event.data.get("files", []),
+        }
+        structured_content = event.data.get("structured_content")
+        if structured_content is not None:
+            # MCP 声明的结构化结果经通用校验后透传；原始工具正文仍不外发。
+            sse_data["structured_content"] = structured_content
+        retrieval_audit = event.data.get("retrieval_audit")
+        if retrieval_audit is not None:
+            sse_data["retrieval_audit"] = retrieval_audit
+        return sse_data
+    elif event.type == EventType.TODO_UPDATE:
+        return {
+            "type": "todo_update",
+            "tool_call_id": event.data.get("tool_call_id", ""),
+            "tool_name": event.data.get("tool_name", "todo_write"),
+            "iteration": event.data.get("iteration", 0),
+            "todos": event.data.get("todos", []),
+            "count": event.data.get("count", 0),
+            "finalized": bool(event.data.get("finalized", False)),
         }
     elif event.type == EventType.TURN_END:
         return {
@@ -989,6 +1032,24 @@ async def _has_whitelisted_mcp_tools(preset_allowed: list[str] | None) -> bool:
     except Exception as e:  # noqa: BLE001 - 发现失败不阻塞主流程
         logger.warning("[Chat] MCP 工具发现失败，本次按无外部工具路由: %s", sanitize_for_log(e))
         return False
+
+
+def _resolve_parallel_tool_config(
+    preset_cfg: dict,
+    max_concurrency: object,
+) -> tuple[bool, int]:
+    """Resolve preset opt-in and normalize the platform concurrency cap."""
+    try:
+        bounded_concurrency = max(1, int(max_concurrency))
+    except (TypeError, ValueError):
+        bounded_concurrency = 1
+    enabled = preset_cfg.get("parallel_tool_calls", False)
+    if isinstance(enabled, str):
+        normalized = enabled.strip().casefold()
+        enabled = normalized in {"1", "true", "yes", "on"}
+    else:
+        enabled = bool(enabled)
+    return enabled, bounded_concurrency
 
 
 async def _build_agent_runtime(
@@ -1059,7 +1120,18 @@ async def _build_agent_runtime(
         retrieval_cache = await get_retrieval_cache()
 
     state = AgentState()
-    tool_registry = ToolRegistry()
+    tool_registry = ToolRegistry(
+        output_budgets={
+            "search_knowledge": 14_000,
+            "list_documents": 8_000,
+            "read_document": 20_000,
+            "read_attachment": 16_000,
+            "read_skill": 8_000,
+            "todo_write": 4_000,
+            "calculate": 4_000,
+            "web_search": 8_000,
+        }
+    )
     event_bus = EventBus()
 
     # 主库：grep_chunks / list_knowledge_chunks 这类单库工具的归属库（kb_ids 为空时为 None）。
@@ -1084,23 +1156,39 @@ async def _build_agent_runtime(
             return True
         return tool_name in preset_allowed
 
-    if _tool_enabled("knowledge_search") and search_targets:
+    if _tool_enabled("search_knowledge") and search_targets:
         tool_registry.register(
-            KnowledgeSearchTool(
+            SearchKnowledgeTool(
                 hybrid_retriever,
                 state=state,
                 tenant_id=tenant_id,
                 search_targets=search_targets,
-                dedupe_queries_enabled=preset_cfg.get("query_dedup_enabled", True),
-                max_queries_per_call=preset_cfg.get("max_queries_per_call", 3),
                 cache=retrieval_cache,
+                session_id=session_id,
             )
         )
-    # grep_chunks / list_knowledge_chunks 仅作用于主库，不接会话源（design C2 决策，非遗漏）。
-    if _tool_enabled("grep_chunks") and primary_kb_id:
-        tool_registry.register(GrepChunksTool(bm25_retriever, primary_kb_id, state))
-    if _tool_enabled("list_knowledge_chunks"):
-        tool_registry.register(ListKnowledgeChunksTool())
+    if _tool_enabled("list_documents"):
+        tool_registry.register(
+            ListDocumentsTool(
+                kb_ids=kb_ids,
+                session_id=session_id,
+                include_session_source=include_session_source,
+                state=state,
+            )
+        )
+    if _tool_enabled("read_document"):
+        tool_registry.register(
+            ReadDocumentTool(
+                kb_ids=kb_ids,
+                session_id=session_id,
+                include_session_source=include_session_source,
+                state=state,
+            )
+        )
+    if _tool_enabled("todo_write"):
+        tool_registry.register(TodoWriteTool(state=state))
+    if _tool_enabled("calculate"):
+        tool_registry.register(CalculateTool())
     # read_attachment：本条消息绑定附件 → 注册确定性整篇直读工具。file_id 在此锚定
     # （来自 request.attachments），LLM 不能指定/伪造，只能选读哪个 filename 或翻页，
     # 杜绝越权；附件解析不再丢进 knowledge_search 与知识库文档竞争召回（WeKnora 借鉴）。
@@ -1167,6 +1255,10 @@ async def _build_agent_runtime(
         timezone_name=timezone_name,
         include_clock=False,
     )
+    parallel_tool_calls, tool_call_max_concurrency = _resolve_parallel_tool_config(
+        preset_cfg,
+        settings.agent_tool_call_max_concurrency,
+    )
     config = AgentConfig(
         max_iterations=preset_cfg.get("max_iterations", settings.agent_max_iterations),
         max_context_tokens=max_context_tokens or AgentConfig.max_context_tokens,
@@ -1176,6 +1268,8 @@ async def _build_agent_runtime(
         # thinking_enabled 现在只表示“是否开启模型原生 thinking/reasoning 通道”，
         # 不再注册 ThinkingTool。小模型没有独立通道时，loop 会在服务端做能力兼容。
         thinking_enabled=preset_cfg.get("thinking_enabled", True),
+        parallel_tool_calls=parallel_tool_calls,
+        tool_call_max_concurrency=tool_call_max_concurrency,
         system_prompt=system_prompt,
         custom_instructions=custom_instructions,
         timezone_name=timezone_name,
@@ -1186,6 +1280,12 @@ async def _build_agent_runtime(
         query_rewrite_max_attempts=preset_cfg.get("query_rewrite_max_attempts", 1),
         context_pruning_enabled=preset_cfg.get("context_pruning_enabled", True),
         retrieval_cache_enabled=preset_cfg.get("retrieval_cache_enabled", True),
+        compaction_checkpoint_enabled=preset_cfg.get(
+            "compaction_checkpoint_enabled", True
+        ),
+        llm_stall_timeout=preset_cfg.get(
+            "llm_stall_timeout", AgentConfig.llm_stall_timeout
+        ),
         reasoning_effort=(preset_cfg.get("reasoning_effort") or None),
     )
     # caller_ctx 交给引擎：执行工具时按需下传（仅外部 MCP 工具消费，用于把调用方身份
@@ -1265,11 +1365,18 @@ async def _run_agent_nonstream(
         degraded = True
 
     total_steps = len(result_state.steps) if result_state else 0
-    duration_end = text_delta_at if text_delta_at is not None else time.time()
+    elapsed_end = time.time()
+    first_answer_ms = (
+        int((text_delta_at - agent_start_time) * 1000)
+        if text_delta_at is not None
+        else int((elapsed_end - agent_start_time) * 1000)
+    )
+    total_duration_ms = int((elapsed_end - agent_start_time) * 1000)
     steps_collected.append({
         "type": "complete",
         "total_steps": total_steps,
-        "total_duration_ms": int((duration_end - agent_start_time) * 1000),
+        "total_duration_ms": total_duration_ms,
+        "first_answer_ms": first_answer_ms,
     })
     return answer, state.knowledge_refs, degraded, steps_collected, list(state.failed_source_ids)
 
@@ -1480,15 +1587,20 @@ async def _stream_response(
             yield json.dumps(turn_end_event, ensure_ascii=False)
         full_response = full_response or ""
 
-        # 发射 complete 事件（携带整体耗时，供前端步骤统计展示）
-        # 耗时截止于首个 text_delta 事件（答案开始产出）；若全程无 text_delta
-        # （异常兜底等），退回到当前时刻，保证始终有合理值。
-        duration_end = text_delta_at if text_delta_at is not None else time.time()
-        total_duration_ms = int((duration_end - agent_start_time) * 1000)
+        # complete 携带真实请求总耗时；首答耗时单独保留，步骤面板可区分
+        # “开始返回答案”与“整个请求结束”。
+        elapsed_end = time.time()
+        total_duration_ms = int((elapsed_end - agent_start_time) * 1000)
+        first_answer_ms = (
+            int((text_delta_at - agent_start_time) * 1000)
+            if text_delta_at is not None
+            else total_duration_ms
+        )
         complete_event = {
             "type": "complete",
             "total_steps": len(result_state.steps) if result_state else 0,
             "total_duration_ms": total_duration_ms,
+            "first_answer_ms": first_answer_ms,
         }
         agent_steps_collected.append(complete_event)
         yield json.dumps(complete_event, ensure_ascii=False)

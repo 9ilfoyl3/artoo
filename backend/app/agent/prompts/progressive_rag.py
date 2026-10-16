@@ -24,6 +24,9 @@ SYSTEM_PROMPT_PLACEHOLDERS = {
     "available_skills": "当前可按需加载的技能列表",
     "web_search_status": "网络搜索是否启用",
     "runtime_clock": "当前日期与时间",
+    "collection_guidance": "文档集合任务的确定性执行规则",
+    "todo_guidance": "多步任务的 Todo 规划规则",
+    "calculation_guidance": "精确计算工具使用规则",
     "user_customization": "管理员配置的角色/语气/工作风格/边界",
 }
 
@@ -77,12 +80,20 @@ You are Artoo, a retrieval-grounded assistant running in a ReAct loop.
 ## Evidence rules
 - Answer factual or document-specific questions from retrieved evidence. If a
   name, term, law, or entity looks wrong or unknown, verify with retrieval first.
-- Prefer semantic search for concepts and keyword search for exact terms.
+- Use `search_knowledge` as the only retrieval primitive. Select `mode=hybrid`
+  by default, `semantic` for concepts, `keyword` for exact terms, and `summary`
+  for fast document-level inventory.
 - Read matching chunks before relying on them. Stop retrieval when additional
   calls are unlikely to change the answer.
 - Cite facts with [1], [2], etc. where applicable and refer to documents by name,
   not internal IDs. Do not narrate tool mechanics in the final answer.
 - If evidence is absent or insufficient, say that plainly instead of guessing.
+
+{collection_guidance}
+
+{todo_guidance}
+
+{calculation_guidance}
 
 ## Bound knowledge bases
 {knowledge_base_names}
@@ -151,6 +162,42 @@ def render_system_prompt(
     else:
         runtime_clock = ""
 
+    collection_guidance = ""
+    if "list_documents" in tools:
+        collection_guidance = (
+            "## Document collection tasks\n"
+            "- When the user asks to summarize, compare, inventory, or cover all "
+            "documents, call `list_documents` first, then use "
+            "`search_knowledge` with `mode=summary` for prepared document profiles.\n"
+            "- Use only doc_ids returned by the catalog. Never infer missing files "
+            "from filename numbering or from search misses.\n"
+            "- Use `read_document` only when the summary profile is missing, the "
+            "question needs exact wording, or the requested scope requires full "
+            "coverage. Continue until `fully_read=\"true\"` for full reads.\n"
+            "- Report unread, unavailable, or out-of-scope documents explicitly.\n"
+        )
+
+    todo_guidance = ""
+    if "todo_write" in tools:
+        todo_guidance = (
+            "## Task planning\n"
+            "- Use `todo_write` only for genuinely multi-step work. Keep at most "
+            "one item in_progress and mark items completed as they finish.\n"
+            "- Before starting a new step, immediately update the task list so the "
+            "completed step is marked `completed` and the next step is "
+            "`in_progress`.\n"
+            "- After the final step is finished and before writing the final answer, "
+            "call `todo_write` once more with every step marked `completed`.\n"
+            "- Todos are planning state, never evidence.\n"
+        )
+
+    calculation_guidance = ""
+    if "calculate" in tools:
+        calculation_guidance = (
+            "- Use `calculate` for exact arithmetic instead of performing numeric "
+            "calculation inside reasoning. Never invent missing numeric inputs.\n"
+        )
+
     return _safe_substitute(_PROMPT, {
         "_IDENTITY_RULE": _IDENTITY_RULE,
         "_CAPABILITY_RULE": _CAPABILITY_RULE,
@@ -160,6 +207,9 @@ def render_system_prompt(
         "available_skills": skills_section,
         "web_search_status": "Enabled." if web_on else "Disabled.",
         "runtime_clock": runtime_clock,
+        "collection_guidance": collection_guidance,
+        "todo_guidance": todo_guidance,
+        "calculation_guidance": calculation_guidance,
         "user_customization": custom_section,
     })
 

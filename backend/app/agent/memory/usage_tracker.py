@@ -48,7 +48,12 @@ class UsageTracker:
         self._last_usage: TokenUsage | None = None
         self._last_sent_msg_count: int = 0
 
-    def update(self, usage: TokenUsage, sent_msg_count: int) -> None:
+    def update(
+        self,
+        usage: TokenUsage,
+        sent_msg_count: int,
+        messages: list[dict] | None = None,
+    ) -> None:
         """记录一次 API 调用的 usage
 
         WHEN LLM API 返回 usage 且 total_tokens > 0，记录该 usage 和本次发送的
@@ -67,6 +72,11 @@ class UsageTracker:
 
         self._last_usage = usage
         self._last_sent_msg_count = sent_msg_count
+        if messages is not None and usage.prompt_tokens > 0:
+            self._estimator.calibrate_from_usage(
+                prompt_tokens=usage.prompt_tokens,
+                messages=messages,
+            )
 
     def estimate_current_tokens(self, messages: list[dict]) -> int:
         """估算当前上下文的总 token 数

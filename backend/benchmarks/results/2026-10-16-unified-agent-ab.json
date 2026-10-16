@@ -1,0 +1,59 @@
+{
+  "date": "2026-10-16",
+  "environment": {
+    "base_url": "http://127.0.0.1:8000",
+    "kb_id": "fd7a6a47-ed69-4088-8296-8e0a08840a25",
+    "kb_documents": 48,
+    "kb_completed_documents": 46,
+    "kb_failed_documents": 2,
+    "summary_artifacts_completed": 46,
+    "model": "TuringYitian-32B",
+    "thinking_enabled": false,
+    "query": "请总结知识库文档的核心要点，并标注每条来自哪份文件。知识库内一共6、7个文件？"
+  },
+  "case_a": {
+    "name": "search-only hybrid baseline",
+    "preset_id": "e0a5079a-1e50-40f0-86b5-9387b58ce79b",
+    "elapsed_ms": 30532,
+    "first_text_ms": 30525,
+    "tool_call_count": 5,
+    "retrieval_call_count": 4,
+    "retrieved_file_count": 1,
+    "answer_chars": 959,
+    "max_context_tokens_estimate": 7444,
+    "retrieval_durations_ms": [1359, 507, 414, 432],
+    "errors": []
+  },
+  "case_b": {
+    "name": "durable summary artifacts",
+    "preset_id": "ea4f78f1-3bd5-4822-b089-df7c491c975e",
+    "elapsed_ms": 40238,
+    "first_text_ms": 40237,
+    "tool_call_count": 2,
+    "retrieval_call_count": 1,
+    "retrieved_file_count": 46,
+    "answer_chars": 3308,
+    "max_context_tokens_estimate": 12468,
+    "tool_durations_ms": {
+      "list_documents": 34,
+      "search_knowledge_summary": 42
+    },
+    "retrieval_audit": {
+      "raw_count": 46,
+      "returned_count": 46,
+      "limit": 100,
+      "cutoff_applied": false,
+      "mode": "summary"
+    },
+    "errors": []
+  },
+  "comparison": {
+    "tool_call_reduction": 3,
+    "file_coverage_delta": 45,
+    "answer_chars_ratio": 3.45,
+    "elapsed_ratio": 1.32,
+    "baseline_output_chars_per_second": 31.4,
+    "summary_output_chars_per_second": 82.2,
+    "interpretation": "The baseline answered quickly but covered only 1 of 46 readable documents. The summary path covered all 46 in one 42 ms retrieval call and produced a longer answer; the extra elapsed time is model generation, not retrieval."
+  }
+}

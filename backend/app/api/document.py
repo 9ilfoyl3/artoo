@@ -25,6 +25,7 @@ from app.schema.api import PageResult
 from app.schema.db import (
     Chunk,
     Document,
+    DocumentSummary,
     Folder,
     KnowledgeBase,
     KnowledgeBaseGrant,
@@ -253,6 +254,21 @@ class DocumentResponse(BaseModel):
     created_at: str
 
 
+class DocumentSummaryResponse(BaseModel):
+    """Versioned summary artifact for the document preview UI."""
+
+    doc_id: str
+    status: str
+    summary: str | None = None
+    gist: str | None = None
+    topics: list[str] = []
+    doc_type: str | None = None
+    typical_question: str | None = None
+    content_version: str | None = None
+    chunk_count: int = 0
+    generated_at: str | None = None
+
+
 class ChunkResponse(BaseModel):
     """切片响应"""
     model_config = {"from_attributes": True}
@@ -319,6 +335,7 @@ async def _run_pipeline(file_path: str, doc_id: str, kb_id: str) -> None:
 
         ocr_manager = await load_ocr_manager()
         asr_manager = await load_asr_manager()
+        from app.summary.queue import get_document_summary_queue
 
         pipeline = DocumentPipeline(
             model_manager=manager,
@@ -326,6 +343,7 @@ async def _run_pipeline(file_path: str, doc_id: str, kb_id: str) -> None:
             db_session_factory=async_session,
             ocr_manager=ocr_manager,
             asr_manager=asr_manager,
+            summary_queue=get_document_summary_queue(),
         )
         await pipeline.process(file_path, doc_id, kb_id)
         print(f"[Pipeline] 文档 {doc_id} 处理完成")
@@ -786,6 +804,52 @@ async def get_document(
     )
 
 
+@router.get(
+    "/api/documents/{doc_id}/summary",
+    response_model=DocumentSummaryResponse,
+)
+async def get_document_summary(
+    doc_id: str,
+    identity: IdentityContext = Depends(require_authenticated()),
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Read the durable summary artifact without triggering generation.
+
+    Generation is scheduled only after document ingestion completes and runs
+    in the independent ``pipeline:summaries`` worker lane. This endpoint is a
+    plain read: hovering the file in the UI must never block upload, parsing,
+    indexing, or any other document operation.
+    """
+    document = await db.scalar(select(Document).where(Document.id == doc_id))
+    if document is None:
+        raise CrossTenantError()
+
+    # Reuse the same KB read authorization used by the document list.
+    await _authorize_kb_access(db, identity, document.kb_id, KbAccessEnum.READ)
+
+    artifact = await db.scalar(
+        select(DocumentSummary).where(
+            DocumentSummary.source == "document",
+            DocumentSummary.doc_id == doc_id,
+        )
+    )
+    if artifact is None:
+        return DocumentSummaryResponse(doc_id=doc_id, status="missing")
+
+    return DocumentSummaryResponse(
+        doc_id=doc_id,
+        status=artifact.status,
+        summary=artifact.summary,
+        gist=artifact.gist,
+        topics=list(artifact.topics or []),
+        doc_type=artifact.doc_type,
+        typical_question=artifact.typical_question,
+        content_version=artifact.content_version,
+        chunk_count=artifact.chunk_count or 0,
+        generated_at=artifact.generated_at.isoformat() if artifact.generated_at else None,
+    )
+
+
 @router.post("/api/documents/{doc_id}/retry", response_model=DocumentResponse)
 async def retry_document(
     doc_id: str,
@@ -901,6 +965,14 @@ async def delete_document(
         kb.doc_count -= 1
 
     # 删除文档（ORM cascade 会自动删除关联 chunks）
+    from sqlalchemy import delete as sql_delete
+
+    await db.execute(
+        sql_delete(DocumentSummary).where(
+            DocumentSummary.source == "document",
+            DocumentSummary.doc_id == doc_id,
+        )
+    )
     await db.delete(doc)
     await db.commit()
 
@@ -1103,6 +1175,12 @@ async def batch_delete_documents(
 
     # ─── 批量删除 DB 记录（仅本租户已确认的文档） ───
     await db.execute(sql_delete(Chunk).where(Chunk.doc_id.in_(doc_ids_found)))
+    await db.execute(
+        sql_delete(DocumentSummary).where(
+            DocumentSummary.source == "document",
+            DocumentSummary.doc_id.in_(doc_ids_found),
+        )
+    )
     await db.execute(sql_delete(Document).where(Document.id.in_(doc_ids_found)))
     await db.commit()
 

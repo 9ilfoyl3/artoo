@@ -60,9 +60,10 @@ Artoo 以 ReAct Agent 为核心，让大模型自主编排关键词检索、语�
 │   EventBus 事件总线  │  三层递进式上下文管理  │  Skills 技能  │
 ├─────────────────────────────────────────────────────────────┤
 │                         工具层                               │
-│  knowledge_search │ grep_chunks │ list_knowledge_chunks      │
-│  read_attachment │ read_skill │ thinking │ web_search        │
-│  final_answer │ MCP Tools                                    │
+│  knowledge_search │ grep_chunks │ list_knowledge_documents   │
+│  read_document │ list_knowledge_chunks │ summarize_documents │
+│  calculate │ read_attachment │ read_skill │ web_search     │
+│  thinking │ MCP Tools                                          │
 ├─────────────────────────────────────────────────────────────┤
 │                        检索工具层                            │
 │   Dense + Sparse + BM25 (+ Graph) → RRF 融合 → Rerank → MMR  │
