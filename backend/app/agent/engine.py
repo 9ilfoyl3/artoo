@@ -281,6 +281,7 @@ class AgentEngine:
         self._clock_context = ""
         self._checkpoint_needed = False
         self._checkpoint_messages: list[dict] | None = None
+        self._latest_todos: list[dict] = []
 
     async def execute(
         self,
@@ -453,6 +454,7 @@ class AgentEngine:
                 state.is_complete = True
                 state.steps.append(step)
                 state.current_round += 1
+                await self._complete_todos_for_final(session_id, iteration)
                 await self._emit_turn_end(session_id, response.finish_reason)
                 return
 
@@ -791,6 +793,22 @@ class AgentEngine:
                 session_id=session_id,
                 data=event_data,
             ))
+            todo_state = (result.data or {}).get("todos")
+            if isinstance(todo_state, list):
+                self._latest_todos = [
+                    dict(todo) for todo in todo_state if isinstance(todo, dict)
+                ]
+                await self._event_bus.emit(AgentEvent(
+                    type=EventType.TODO_UPDATE,
+                    session_id=session_id,
+                    data={
+                        "tool_call_id": call.id,
+                        "tool_name": call.function_name,
+                        "iteration": step.iteration,
+                        "todos": todo_state,
+                        "count": len(todo_state),
+                    },
+                ))
             reminder = (
                 repeat_tracker.observe(call.function_name, args)
                 if repeat_tracker is not None
@@ -946,6 +964,38 @@ class AgentEngine:
             logger.exception("[Agent] tool %s failed", call.function_name)
             result = ToolResult(success=False, error=str(exc))
         return result, int((time.time() - started) * 1000)
+
+    async def _complete_todos_for_final(
+        self,
+        session_id: str,
+        iteration: int,
+    ) -> None:
+        """Mark a naturally completed turn's remaining visible steps completed.
+
+        The model is instructed to do this explicitly, but a normal final answer
+        is also a deterministic completion boundary. This keeps the UI from
+        leaving the final step stuck at ``in_progress`` when the model omits the
+        last bookkeeping call.
+        """
+        if not self._latest_todos:
+            return
+        if all(todo.get("status") == "completed" for todo in self._latest_todos):
+            return
+        self._latest_todos = [
+            {**todo, "status": "completed"} for todo in self._latest_todos
+        ]
+        await self._event_bus.emit(AgentEvent(
+            type=EventType.TODO_UPDATE,
+            session_id=session_id,
+            data={
+                "tool_call_id": "",
+                "tool_name": "todo_write",
+                "iteration": iteration,
+                "todos": self._latest_todos,
+                "count": len(self._latest_todos),
+                "finalized": True,
+            },
+        ))
 
     async def _emit_token_usage(self, messages: list[dict], usage: TokenUsage | None) -> None:
         await self._event_bus.emit(AgentEvent(

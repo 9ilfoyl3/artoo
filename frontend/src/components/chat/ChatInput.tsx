@@ -7,6 +7,7 @@ import ContextUsageRing from '@/components/chat/ContextUsageRing'
 import KbSelector from '@/components/chat/KbSelector'
 import KbSelectionList from '@/components/chat/KbSelectionList'
 import SessionFileList, { type PendingSessionFile } from '@/components/chat/SessionFileList'
+import TaskList, { type TaskListItem } from '@/components/chat/TaskList'
 import type { AgentPresetItem, SessionFileResponse } from '@/lib/api'
 
 /** 会话上传支持的文件类型（与后端 _ALLOWED_EXTENSIONS 一致）。 */
@@ -68,6 +69,8 @@ interface ChatInputProps {
   sessionImagePreviewUrls?: Record<string, string>
   /** 当前会话 ID（用于 Artifact 面板按会话拉取附件原件预览） */
   sessionId?: string | null
+  /** Codex-style live task list shown above the composer. */
+  todos?: TaskListItem[]
 }
 
 function ChatInput({
@@ -97,6 +100,7 @@ function ChatInput({
   onDismissPendingSessionFile,
   sessionImagePreviewUrls = {},
   sessionId = null,
+  todos = [],
 }: ChatInputProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -191,6 +195,7 @@ function ChatInput({
   if (centered) {
     return (
       <div className="w-full">
+        <TaskList todos={todos} />
         <div className="rounded-3xl border border-border bg-card shadow-lg transition-shadow focus-within:shadow-xl focus-within:border-primary/30">
           {fileListSlot}
           <textarea
@@ -281,6 +286,7 @@ function ChatInput({
   return (
     <div className="absolute bottom-0 left-0 right-0 p-4 bg-linear-to-t from-background via-background to-transparent pt-10 pointer-events-none">
       <div className="max-w-3xl mx-auto pointer-events-auto">
+        <TaskList todos={todos} />
         <div className="rounded-2xl border border-border bg-card shadow-lg">
           {fileListSlot}
           <textarea

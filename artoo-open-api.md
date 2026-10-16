@@ -780,6 +780,7 @@ curl -N -X POST $BASE/v1/chat/completions \
 | `tool_call` | `tool_name`(str)、`tool_call_id`(str)、`arguments`(object)、`iteration`(int) | 发起一次工具调用。同一 `iteration` 可并行发多条。`arguments` 为工具入参（如 `{"query":"保修期"}`） |
 | `tool_progress` | `tool_call_id`(str)、`tool_name`(str)、`iteration`(int)、`phase`(str)、`completed`(int)、`total`(int)、`filename`(str, optional)、`success`(bool, optional)、`cache_hit`(bool, optional)、`elapsed_ms`(int)、`message`(str, optional) | 长工具调用的有界进度，不新建步骤行。`phase` 为 `start` / `heartbeat` / `document` / `complete`。当前 `summarize_documents` 会按文档完成情况和最长 10 秒心跳发送；旧客户端可忽略 |
 | `tool_result` | `tool_call_id`(str)、`tool_name`(str)、`success`(bool)、`duration_ms`(int)、`files`(array)、`structured_content`(object, optional) | 工具执行结果。按 `tool_call_id` 回填到对应 `tool_call`。`files` 为本次工具读到的文件，每项 `{id, filename, source}`，`source`∈`document`(知识库文档) / `session-file`(会话临时文件)，可据此拼预览链接（见 4.9 / 8.4）。MCP 工具返回合法 `structuredContent` 时，额外透传 `{kind, data}`，供宿主按 `kind` 渲染；原始工具正文仍不外发 |
+| `todo_update` | `tool_call_id`(str)、`tool_name`(str)、`iteration`(int)、`count`(int)、`todos`(array)、`finalized`(bool, optional) | `todo_write` 后的完整任务清单快照。每项 `{content: str, status: "pending"\|"in_progress"\|"completed"}`；宿主应替换当前任务列表，不应按增量拼接。`finalized=true` 表示正常结束前服务端兜底将剩余步骤标记完成。旧客户端可忽略 |
 | `text_delta` | `content`(str)、`iteration`(int) | 用户可见正文增量。正常情况来自自然停止的 assistant text；服务端兜底/合成答案也使用同一事件。不要把 answer 承载在 tool call 参数里 |
 | `token_usage` | `prompt_tokens`、`completion_tokens`、`total_tokens`、`max_context_tokens`、`current_context_tokens` | 上下文占用，可用于渲染「上下文已用 x/y」 |
 | `turn_end` | `finish_reason`(str) | Agent 本轮结束原因：`stop`、`max_iterations`、`length`、`error`、`empty` 等。`length` 表示正文可能被单次输出上限截断；`empty` 表示模型重试后仍没有返回内容 |
@@ -833,6 +834,7 @@ curl -N -X POST $BASE/v1/chat/completions \
 8. `complete`：`total_duration_ms` 是真实总耗时，`first_answer_ms` 是首答延迟。宿主可分别展示“总耗时”和“首答耗时”。
 9. `token_usage`：更新上下文用量指示。
 10. 兜底：若归约完一段 `answer` 都没有，而消息 `content`（历史回放）非空，补一段 `answer`。
+11. `todo_update`：不新建过程段；用 `todos` 替换当前任务清单 UI。每项按 `status` 渲染 pending / in_progress / completed。
 
 > 只想要「纯答案 + 引用」的第三方可以忽略 `reasoning_delta` / `tool_call` / `tool_result`，只拼接 `text_delta.content` 并读末尾的 `references`，行为等价于普通流式问答。
 
@@ -2465,3 +2467,32 @@ Artoo 内置 `read_document` 只读取 Artoo 授权的知识库文档和当前�
 3. 部署 worker 并确认 `pipeline:summaries` 消费正常；
 4. 若自建 Agent 预设的 `allowed_tools` 显式列出旧工具名，改为 `search_knowledge`、`list_documents`、`read_document`、`todo_write`、`calculate`；
 5. 如需展示摘要预览，可选调用 4.12 的只读接口；不调用不影响原有对话和文件流程。
+
+#### 13.17 `todo_write` 可视化任务条
+
+Agent 使用 `todo_write` 时会额外发送 `todo_update` SSE 事件：
+
+```json
+{
+  "type": "todo_update",
+  "tool_call_id": "call_2",
+  "tool_name": "todo_write",
+  "iteration": 1,
+  "count": 3,
+  "finalized": false,
+  "todos": [
+    { "content": "收集资料", "status": "completed" },
+    { "content": "分析证据", "status": "in_progress" },
+    { "content": "生成答案", "status": "pending" }
+  ]
+}
+```
+
+字段语义：
+
+- `todos` 是**完整快照**，不是增量；业务前端收到后应替换当前任务清单。
+- `status`：`pending` / `in_progress` / `completed`。
+- 该事件也进入 `agent_steps`，因此刷新历史后仍可恢复最后一次任务状态。
+- 正常自然结束前，服务端会在模型遗漏最终 bookkeeping 时补发一个 `finalized=true` 的全完成快照。
+- 不消费该事件不影响对话正文、引用、工具结果或会话历史。
+- Artoo 平台前端在其输入框上方渲染 Codex 风格任务条：默认折叠显示完成进度和当前步骤，点击后展开完整任务列表。

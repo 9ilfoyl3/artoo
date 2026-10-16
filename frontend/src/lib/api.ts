@@ -912,6 +912,8 @@ export interface SessionMessageItem {
     elapsed_ms?: number
     message?: string
     first_answer_ms?: number
+    todos?: { content: string; status: 'pending' | 'in_progress' | 'completed' }[]
+    count?: number
     step: string
     detail: string
     max_context_tokens?: number

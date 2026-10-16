@@ -31,6 +31,16 @@ The document plane is intentionally small:
 - `todo_write` is the only additional planning tool. It owns a bounded task list
   in `AgentState` and is serialized against reads because it mutates loop state.
 
+`todo_write` emits a `todo_update` event containing the complete task-list
+snapshot. The Chat UI renders a Codex-style task rail above the composer:
+collapsed by default with progress and the active step, expandable to show every
+step and its `pending` / `in_progress` / `completed` state. The event is also
+stored in `agent_steps`, so switching sessions or reloading history restores the
+latest visible task list. The model is instructed to mark a step completed
+before starting the next one, and the engine emits a deterministic
+`finalized=true` all-completed snapshot before a normal final answer if the
+model omits the last bookkeeping call.
+
 `search_knowledge` applies deterministic post-processing: exact chunk-ID
 deduplication, normalized content signatures, token-overlap near-duplicate
 removal, child-to-parent context expansion, bounded neighbour expansion,
@@ -121,6 +131,9 @@ normalization. Existing Agent, retrieval, structured-result, and data-plane
 suites cover the compatibility-sensitive loop and protocol paths.
 The frontend `DocumentSummaryPreview` test covers completed artifacts and the
 explicit missing-artifact state.
+`backend/tests/test_unified_knowledge_agent_core.py` also verifies the
+`todo_update` event, and `frontend/src/components/chat/TaskList.test.tsx`
+verifies collapsed progress plus expanded step rendering.
 
 The real 48-document KB A/B run (`backend/benchmarks/results/2026-10-16-unified-agent-ab.json`)
 shows the search-only baseline answering in 30.5 seconds after 4 retrieval calls

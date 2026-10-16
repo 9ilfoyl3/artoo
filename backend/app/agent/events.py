@@ -16,6 +16,7 @@ class EventType(str, Enum):
     TOOL_CALL = "tool_call"
     TOOL_PROGRESS = "tool_progress"
     TOOL_RESULT = "tool_result"
+    TODO_UPDATE = "todo_update"
     TOKEN_USAGE = "token_usage"  # 每轮 LLM 调用后的 token 用量事件，供前端上下文进度条消费
     TURN_END = "turn_end"
     COMPLETE = "complete"

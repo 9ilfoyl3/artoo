@@ -27,6 +27,13 @@ Agent 预设或内置预设。
 - `todo_write` 是唯一新增的规划工具。它维护 `AgentState` 中有界的任务列表，因会
   修改 loop 状态，调度器会将其与读取工具之间建立串行屏障。
 
+`todo_write` 会发出携带完整任务快照的 `todo_update` 事件。Chat UI 在输入框上方
+渲染 Codex 风格任务条：默认折叠显示进度与当前步骤，点击后展开完整步骤列表及
+`pending` / `in_progress` / `completed` 状态。事件同时写入 `agent_steps`，切换会话
+或刷新历史后可恢复最近一次任务状态。模型被要求开始下一步前先将上一步标记完成。
+若模型遗漏最后一步的 bookkeeping，引擎会在正常最终答案前补发
+`finalized=true` 的全完成快照。
+
 `search_knowledge` 执行确定性后处理：精确 chunk ID 去重、规范化内容签名、基于
 token overlap 的近重复去除、子块到父块扩展、有界邻块扩展、相邻父块合并、来源与
 位置稳定排序、FAQ answer 注入，以及挂到工具结果和 SSE 事件上的 retrieval audit。
@@ -91,6 +98,8 @@ per-tool 输出预算、Todo 校验、确定性检索后处理、token 校准、
 以及摘要 profile 规范化。既有 Agent、retrieval、structured-result 与 data-plane
 套件覆盖兼容敏感 loop 和协议路径。
 前端 `DocumentSummaryPreview` 测试覆盖已完成制品和显式缺失态。
+`backend/tests/test_unified_knowledge_agent_core.py` 同时验证 `todo_update` 事件，
+`frontend/src/components/chat/TaskList.test.tsx` 验证折叠进度和展开步骤渲染。
 
 真实 48 文档 KB A/B 运行
 （`backend/benchmarks/results/2026-10-16-unified-agent-ab.json`）显示：search-only

@@ -965,6 +965,16 @@ def _agent_event_to_sse(event: AgentEvent) -> dict | None:
         if retrieval_audit is not None:
             sse_data["retrieval_audit"] = retrieval_audit
         return sse_data
+    elif event.type == EventType.TODO_UPDATE:
+        return {
+            "type": "todo_update",
+            "tool_call_id": event.data.get("tool_call_id", ""),
+            "tool_name": event.data.get("tool_name", "todo_write"),
+            "iteration": event.data.get("iteration", 0),
+            "todos": event.data.get("todos", []),
+            "count": event.data.get("count", 0),
+            "finalized": bool(event.data.get("finalized", False)),
+        }
     elif event.type == EventType.TURN_END:
         return {
             "type": "turn_end",

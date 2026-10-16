@@ -183,6 +183,11 @@ def render_system_prompt(
             "## Task planning\n"
             "- Use `todo_write` only for genuinely multi-step work. Keep at most "
             "one item in_progress and mark items completed as they finish.\n"
+            "- Before starting a new step, immediately update the task list so the "
+            "completed step is marked `completed` and the next step is "
+            "`in_progress`.\n"
+            "- After the final step is finished and before writing the final answer, "
+            "call `todo_write` once more with every step marked `completed`.\n"
             "- Todos are planning state, never evidence.\n"
         )
 

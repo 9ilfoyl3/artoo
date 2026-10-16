@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from unittest.mock import AsyncMock, patch
 
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.agent.config import AgentConfig
 from app.agent.engine import AgentEngine
-from app.agent.events import EventBus
+from app.agent.events import EventBus, EventType
 from app.agent.json_repair import parse_json_with_repair, parse_tool_arguments
 from app.agent.memory.token_estimator import TokenEstimator
 from app.agent.retrieval_postprocess import postprocess_retrieval
@@ -109,6 +110,34 @@ class _StallLLM:
         yield StreamChunk(content="late", finish_reason="stop")
 
 
+class _TodoThenFinishLLM:
+    def __init__(self):
+        self.calls = 0
+
+    async def stream_with_tools(self, messages, tools, **kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            yield StreamChunk(
+                tool_calls=[
+                    LLMToolCall(
+                        "todo-1",
+                        "todo_write",
+                        json.dumps(
+                            {
+                                "todos": [
+                                    {"content": "Inspect", "status": "completed"},
+                                    {"content": "Answer", "status": "in_progress"},
+                                ]
+                            }
+                        ),
+                    )
+                ],
+                finish_reason="tool_calls",
+            )
+        else:
+            yield StreamChunk(content="finished", finish_reason="stop")
+
+
 def test_json_repair_is_conservative_and_marks_truncation() -> None:
     repaired = parse_tool_arguments('{"query": "annual report", "mode": "hybrid",}')
     truncated = parse_json_with_repair('{"query": "annual report"')
@@ -160,6 +189,35 @@ def test_todo_write_validates_and_tracks_plan() -> None:
     assert result.success is True
     assert state.todos[0]["content"] == "Inspect documents"
     assert invalid.success is False
+
+
+def test_agent_emits_todo_update_events() -> None:
+    registry = ToolRegistry()
+    registry.register(TodoWriteTool(AgentState()))
+    bus = EventBus()
+    events = []
+
+    async def collect(event):
+        events.append(event)
+
+    bus.on(EventType.TODO_UPDATE, collect)
+    engine = AgentEngine(
+        AgentConfig(
+            system_prompt="stable",
+            compaction_checkpoint_enabled=False,
+        ),
+        _TodoThenFinishLLM(),
+        registry,
+        bus,
+    )
+
+    asyncio.run(engine.execute("session", "do the task"))
+
+    assert len(events) == 2
+    assert events[0].data["todos"][0]["status"] == "completed"
+    assert events[0].data["todos"][1]["status"] == "in_progress"
+    assert events[1].data["finalized"] is True
+    assert all(todo["status"] == "completed" for todo in events[1].data["todos"])
 
 
 def test_retrieval_postprocess_deduplicates_and_audits_cutoff() -> None:

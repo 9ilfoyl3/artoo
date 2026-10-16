@@ -2,5 +2,5 @@
 # last confirmed-consistent state. Both languages carry equal authority; after
 # editing either side, bring the other along and re-record both hashes with:
 #   git hash-object .agents/notes/implemented/architecture/2026-10-16-unified-recall-and-summary-artifacts.md .agents/notes/implemented/architecture/2026-10-16-unified-recall-and-summary-artifacts.zh.md
-2026-10-16-unified-recall-and-summary-artifacts.md: ae36db375b08cfd19b1c37d503574da0e51471ed
-2026-10-16-unified-recall-and-summary-artifacts.zh.md: 6016518634e04e980e019a571ab5819f99c78ab5
+2026-10-16-unified-recall-and-summary-artifacts.md: 19a64e712efd579cbc2e6126f98fb83db4e30667
+2026-10-16-unified-recall-and-summary-artifacts.zh.md: 3bda2177c9ddf7ce168ac8545cb496c72ceac5ee
