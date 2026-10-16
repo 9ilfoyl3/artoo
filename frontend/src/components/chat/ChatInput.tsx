@@ -69,7 +69,7 @@ interface ChatInputProps {
   sessionImagePreviewUrls?: Record<string, string>
   /** 当前会话 ID（用于 Artifact 面板按会话拉取附件原件预览） */
   sessionId?: string | null
-  /** Codex-style live task list shown above the composer. */
+  /** Codex-style live task pill above the composer; hover reveals the checklist. */
   todos?: TaskListItem[]
 }
 

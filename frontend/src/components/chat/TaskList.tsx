@@ -1,9 +1,7 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   Check,
-  ChevronDown,
   Circle,
-  ListTodo,
   LoaderCircle,
 } from 'lucide-react'
 
@@ -38,20 +36,20 @@ export function normalizeTaskList(value: unknown): TaskListItem[] {
 function StatusIcon({ status }: { status: TaskStatus }) {
   if (status === 'completed') {
     return (
-      <span className="relative z-10 flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-emerald-500 text-white shadow-sm">
+      <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-emerald-500 text-white shadow-sm">
         <Check className="h-2.5 w-2.5 stroke-[3]" />
       </span>
     )
   }
   if (status === 'in_progress') {
     return (
-      <span className="relative z-10 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-primary/35 bg-background text-primary shadow-sm">
+      <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-primary/35 bg-primary/10 text-primary shadow-sm">
         <LoaderCircle className="h-2.5 w-2.5 animate-spin" />
       </span>
     )
   }
   return (
-    <span className="relative z-10 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-border bg-background text-muted-foreground/45">
+    <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-border bg-background text-muted-foreground/40">
       <Circle className="h-1.5 w-1.5 fill-current" />
     </span>
   )
@@ -62,109 +60,120 @@ interface TaskListProps {
 }
 
 /**
- * Codex-style compact task rail shown above the composer.
+ * Codex-style live task pill pinned above the composer.
  *
- * The collapsed state keeps the current step visible without adding noise.
- * Expanding reveals the full checklist and its live status transitions.
+ * The pill always occupies layout space ("任务 n/m" tracking the current step);
+ * hovering the pill itself reveals a floating checklist panel anchored directly
+ * above. The panel overlays the transcript without pushing content, and pill
+ * and panel render together, matching the Codex reference.
+ *
+ * Hover handlers live on the pill-width wrapper (not the full-width centering
+ * row) so only the pill is a hover target. Closing is delayed: the pointer can
+ * cross the gap between pill and panel without dismissing it, and the panel
+ * unmounts shortly after the pointer leaves both regions.
  */
 export default function TaskList({ todos }: TaskListProps) {
-  const [expanded, setExpanded] = useState(false)
+  const [hovered, setHovered] = useState(false)
+  const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(
+    () => () => {
+      if (closeTimerRef.current) clearTimeout(closeTimerRef.current)
+    },
+    []
+  )
+
+  // Early return must stay below every hook: todos flips from empty to
+  // populated mid-stream, and a conditional hook count crashes the tree.
   if (todos.length === 0) return null
 
+  const openPanel = () => {
+    if (closeTimerRef.current) {
+      clearTimeout(closeTimerRef.current)
+      closeTimerRef.current = null
+    }
+    setHovered(true)
+  }
+  const scheduleClose = () => {
+    if (closeTimerRef.current) clearTimeout(closeTimerRef.current)
+    closeTimerRef.current = setTimeout(() => {
+      closeTimerRef.current = null
+      setHovered(false)
+    }, 200)
+  }
+
   const completed = todos.filter((todo) => todo.status === 'completed').length
+  const allCompleted = completed === todos.length
   const active =
     todos.find((todo) => todo.status === 'in_progress') ||
     todos.find((todo) => todo.status === 'pending')
-  const allCompleted = completed === todos.length
-  const progress = Math.round((completed / todos.length) * 100)
+  // Codex "Step N/M" semantics: 1-based index of the step being worked on now
+  // (falling back to the total once everything is completed).
+  const currentStep = active ? todos.indexOf(active) + 1 : todos.length
 
   return (
-    <div className="mb-2 overflow-hidden rounded-xl border border-border/80 bg-card/95 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-card/85">
-      <button
-        type="button"
-        onClick={() => setExpanded((value) => !value)}
-        aria-expanded={expanded}
-        className="flex w-full items-center gap-2.5 px-3 py-2.5 text-left transition-colors hover:bg-muted/30"
+    <div className="mb-2 flex justify-center animate-in fade-in-0 duration-200">
+      <div
+        className="relative"
+        onMouseEnter={openPanel}
+        onMouseLeave={scheduleClose}
       >
-        <span
-          className={cn(
-            'flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border',
-            allCompleted
-              ? 'border-emerald-500/20 bg-emerald-500/10 text-emerald-600'
-              : 'border-primary/20 bg-primary/8 text-primary'
-          )}
-        >
-          {allCompleted ? (
-            <Check className="h-3.5 w-3.5 stroke-[3]" />
-          ) : (
-            <ListTodo className="h-3.5 w-3.5" />
-          )}
-        </span>
+        {hovered && (
+          <div className="absolute bottom-full left-1/2 z-30 mb-2.5 w-80 max-w-[calc(100vw-2rem)] -translate-x-1/2 overflow-hidden rounded-xl border border-border/80 bg-card shadow-lg animate-in fade-in-0 slide-in-from-bottom-1 duration-150">
+            <div className="flex items-center gap-2 px-3.5 py-2.5">
+              <span className="text-xs font-semibold text-foreground">任务清单</span>
+              <span className="text-[11px] tabular-nums text-muted-foreground">
+                {currentStep}/{todos.length}
+              </span>
+            </div>
 
-        <span className="min-w-0 flex-1">
-          <span className="flex items-baseline gap-2">
-            <span className="text-xs font-semibold text-foreground">任务</span>
-            <span className="text-[11px] tabular-nums text-muted-foreground">
-              {completed}/{todos.length}
-            </span>
-          </span>
-          <span className="mt-0.5 block truncate text-[11px] text-muted-foreground">
-            {allCompleted ? '全部完成' : active?.content}
-          </span>
-        </span>
-
-        <ChevronDown
-          className={cn(
-            'h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform duration-200',
-            expanded && 'rotate-180'
-          )}
-        />
-      </button>
-
-      <div className="h-0.5 bg-muted/50">
-        <div
-          className={cn(
-            'h-full transition-all duration-500 ease-out',
-            allCompleted ? 'bg-emerald-500' : 'bg-primary'
-          )}
-          style={{ width: `${progress}%` }}
-        />
-      </div>
-
-      {expanded && (
-        <div className="border-t border-border/60 px-3 py-2.5">
-          <div className="space-y-0">
-            {todos.map((todo, index) => {
-              const isLast = index === todos.length - 1
-              return (
-                <div key={`${index}:${todo.content}`} className="relative flex gap-2.5">
-                  {!isLast && (
+            <div className="max-h-64 overflow-y-auto overscroll-contain px-3.5 pb-1 pt-1.5">
+              {todos.map((todo, index) => {
+                const isLast = index === todos.length - 1
+                return (
+                  <div key={`${index}:${todo.content}`} className="relative flex gap-2.5">
+                    {!isLast && (
+                      <span
+                        className={cn(
+                          'absolute left-[7px] top-5 h-[calc(100%-0.25rem)] w-px',
+                          todo.status === 'completed' ? 'bg-emerald-500/30' : 'bg-border'
+                        )}
+                      />
+                    )}
+                    <span className="pt-0.5">
+                      <StatusIcon status={todo.status} />
+                    </span>
                     <span
                       className={cn(
-                        'absolute left-[7px] top-5 h-[calc(100%-0.25rem)] w-px',
-                        todo.status === 'completed' ? 'bg-emerald-500/30' : 'bg-border'
+                        'min-w-0 flex-1 pb-2.5 text-xs leading-5',
+                        todo.status === 'completed' && 'text-muted-foreground line-through decoration-muted-foreground/35',
+                        todo.status === 'in_progress' && 'font-medium text-foreground',
+                        todo.status === 'pending' && 'text-muted-foreground'
                       )}
-                    />
-                  )}
-                  <span className="pt-0.5">
-                    <StatusIcon status={todo.status} />
-                  </span>
-                  <span
-                    className={cn(
-                      'min-w-0 flex-1 pb-2.5 text-xs leading-5',
-                      todo.status === 'completed' && 'text-muted-foreground line-through decoration-muted-foreground/35',
-                      todo.status === 'in_progress' && 'font-medium text-foreground',
-                      todo.status === 'pending' && 'text-muted-foreground'
-                    )}
-                  >
-                    {todo.content}
-                  </span>
-                </div>
-              )
-            })}
+                    >
+                      {todo.content}
+                    </span>
+                  </div>
+                )
+              })}
+            </div>
           </div>
+        )}
+
+        <div
+          title={allCompleted ? '全部任务已完成' : `正在执行：${active?.content ?? ''}`}
+          className="flex h-8 cursor-default items-center gap-2 rounded-full border border-border/70 bg-card/90 pl-3 pr-3 text-[13px] shadow-sm backdrop-blur transition-colors hover:border-border hover:bg-card"
+        >
+          {allCompleted ? (
+            <Check className="h-3.5 w-3.5 shrink-0 stroke-[3] text-emerald-500" />
+          ) : (
+            <LoaderCircle className="h-3.5 w-3.5 shrink-0 animate-spin text-primary" />
+          )}
+          <span className="font-medium tabular-nums text-foreground">
+            任务 {currentStep}/{todos.length}
+          </span>
         </div>
-      )}
+      </div>
     </div>
   )
 }

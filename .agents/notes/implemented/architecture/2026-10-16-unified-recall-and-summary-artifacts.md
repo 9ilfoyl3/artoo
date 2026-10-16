@@ -32,9 +32,14 @@ The document plane is intentionally small:
   in `AgentState` and is serialized against reads because it mutates loop state.
 
 `todo_write` emits a `todo_update` event containing the complete task-list
-snapshot. The Chat UI renders a Codex-style task rail above the composer:
-collapsed by default with progress and the active step, expandable to show every
-step and its `pending` / `in_progress` / `completed` state. The event is also
+snapshot. The Chat UI renders a Codex-style task pill centered above the
+composer: it always occupies layout space and shows the current step ("任务
+n/m", 1-based index of the step being worked on); hovering it reveals a floating
+checklist panel anchored directly above that overlays the transcript without
+pushing content. Closing is delayed ~200 ms so the pointer can travel
+between pill and panel without dismissing it; the panel unmounts once the
+pointer leaves both regions. Pill and panel render together, and each row
+reflects its `pending` / `in_progress` / `completed` state. The event is also
 stored in `agent_steps`, so switching sessions or reloading history restores the
 latest visible task list. The model is instructed to mark a step completed
 before starting the next one, and the engine emits a deterministic
@@ -133,7 +138,8 @@ The frontend `DocumentSummaryPreview` test covers completed artifacts and the
 explicit missing-artifact state.
 `backend/tests/test_unified_knowledge_agent_core.py` also verifies the
 `todo_update` event, and `frontend/src/components/chat/TaskList.test.tsx`
-verifies collapsed progress plus expanded step rendering.
+verifies the step pill, the hover-revealed floating checklist, and the
+pill-to-panel hover traversal with delayed close.
 
 The real 48-document KB A/B run (`backend/benchmarks/results/2026-10-16-unified-agent-ab.json`)
 shows the search-only baseline answering in 30.5 seconds after 4 retrieval calls

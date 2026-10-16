@@ -28,8 +28,11 @@ Agent 预设或内置预设。
   修改 loop 状态，调度器会将其与读取工具之间建立串行屏障。
 
 `todo_write` 会发出携带完整任务快照的 `todo_update` 事件。Chat UI 在输入框上方
-渲染 Codex 风格任务条：默认折叠显示进度与当前步骤，点击后展开完整步骤列表及
-`pending` / `in_progress` / `completed` 状态。事件同时写入 `agent_steps`，切换会话
+居中渲染 Codex 风格任务胶囊：胶囊常驻并占用布局空间，显示当前步骤（"任务 n/m"，
+即正在执行的步骤的 1-based 序号）；鼠标移入即在其正上方弹出悬浮清单面板——面板
+覆盖在对话之上但不推挤内容；关闭带 ~200ms 延迟，指针在胶囊与面板之间移动不会
+误关，真正离开两块区域后才收起。胶囊与面板同时渲染，
+每行呈现 `pending` / `in_progress` / `completed` 状态。事件同时写入 `agent_steps`，切换会话
 或刷新历史后可恢复最近一次任务状态。模型被要求开始下一步前先将上一步标记完成。
 若模型遗漏最后一步的 bookkeeping，引擎会在正常最终答案前补发
 `finalized=true` 的全完成快照。
@@ -99,7 +102,7 @@ per-tool 输出预算、Todo 校验、确定性检索后处理、token 校准、
 套件覆盖兼容敏感 loop 和协议路径。
 前端 `DocumentSummaryPreview` 测试覆盖已完成制品和显式缺失态。
 `backend/tests/test_unified_knowledge_agent_core.py` 同时验证 `todo_update` 事件，
-`frontend/src/components/chat/TaskList.test.tsx` 验证折叠进度和展开步骤渲染。
+`frontend/src/components/chat/TaskList.test.tsx` 验证步骤胶囊、悬停弹出的悬浮清单与胶囊到面板的悬停穿越及延迟关闭。
 
 真实 48 文档 KB A/B 运行
 （`backend/benchmarks/results/2026-10-16-unified-agent-ab.json`）显示：search-only
