@@ -1756,88 +1756,6 @@ curl $BASE/api/system/health
 
 本节只追加变更记录，不改写历史条目。业务系统升级前应逐条核对「业务系统必须同步」和「兼容性」。
 
-### 2026-10-16：统一召回、异步摘要制品、文档读取契约与 Todo
-
-#### 13.0.1 业务系统必须同步的变更
-
-如果业务系统**记录或展示** Artoo SSE 中的 `tool_call.tool_name` / `tool_result.tool_name`，需要同步以下工具名映射：
-
-| 旧工具名 | 新工具名 | 说明 |
-| --- | --- | --- |
-| `knowledge_search` | `search_knowledge` | 唯一召回入口，新增 `mode` 参数 |
-| `grep_chunks` | `search_knowledge` | 精确关键词用 `mode="keyword"` |
-| `list_knowledge_chunks` | `read_document` | 改为字符 offset 分页与 query/regex 定位 |
-| `list_knowledge_documents` | `list_documents` | 新增 `keyword` 过滤与摘要状态 |
-| `summarize_documents` | `search_knowledge(mode="summary")` | 优先读取入库后异步生成的摘要制品 |
-
-`todo_write` 是 Agent 内部规划工具，不新增业务请求字段，也不改变对话请求/响应结构。业务系统只需要把未知工具名按通用 SSE 分支透传或忽略，不应硬编码旧工具名。
-
-#### 13.0.2 SSE 增量字段
-
-工具结果事件新增可选字段：
-
-```json
-{
-  "type": "tool_result",
-  "tool_name": "search_knowledge",
-  "retrieval_audit": {
-    "raw_count": 42,
-    "after_id_dedup": 40,
-    "after_signature_dedup": 37,
-    "after_near_duplicate_dedup": 34,
-    "expanded_count": 41,
-    "merged_count": 18,
-    "returned_count": 10,
-    "limit": 10,
-    "cutoff_applied": true
-  }
-}
-```
-
-该字段是审计与可观测性信息，不稳定作为业务事实；业务系统可以原样保存、忽略或用于展示检索截断提示。`files` 仍只包含本次工具读到的文件元数据。
-
-#### 13.0.3 异步摘要制品
-
-正式文档和会话文件完成索引后，Artoo 会在独立队列 `pipeline:summaries` 中生成版本化摘要制品。摘要完成前：
-
-- `list_documents` 的 `summary_status` 为 `pending` / `processing` / `failed` / `missing`；
-- `search_knowledge(mode="summary")` 只返回已完成的摘要，并带有版本与截断审计；
-- 摘要失效由文档/会话内容版本驱动，版本变化会重新排队。
-
-这是 Artoo 内部能力，不需要业务系统新增数据库表、API 或 MCP 工具。部署侧需要让 worker 进程启动摘要 lane，并保证 Redis Stream 可用；摘要失败不会回滚文档入库。
-
-只读端点 `GET /api/documents/{doc_id}/summary` 是正式对外预览接口：
-
-```json
-{
-  "doc_id": "doc-1",
-  "status": "completed",
-  "summary": "文档核心摘要",
-  "gist": "一句话摘要",
-  "topics": ["主题一", "主题二"],
-  "doc_type": "操作手册",
-  "typical_question": "如何使用该文档？",
-  "content_version": "sha256",
-  "chunk_count": 3,
-  "generated_at": "2026-10-16T00:00:00+00:00"
-}
-```
-
-当摘要尚未生成时返回 `status="missing"`；`pending` / `processing` / `failed` 也会原样返回。该接口只读取 `document_summaries`，不会触发摘要任务，也不会阻塞上传、解析、索引或其他文档操作。
-
-#### 13.0.4 两个 `read_document` 的边界保持不变
-
-Artoo 内置 `read_document` 只读取 Artoo 授权的知识库文档和当前会话文件，按 `doc_id` / `chunk_id`、`offset`、`query` / `regex` 工作。业务系统 MCP 提供的 `read_document` 仍用于业务产物文书、业务版本和业务锚点，两者资源域与权限域不同。
-
-#### 13.0.5 兼容性与迁移
-
-本版本按“新部署、新预设、新数据”设计，不承诺旧 Artoo 工具名继续注册到模型。业务侧不需要迁移对话流程；只需要：
-
-1. 若读取 SSE 工具名，更新映射表；
-2. 若保存 `agent_steps`，允许 `retrieval_audit` 等新增可选字段；
-3. 部署 worker 并确认 `pipeline:summaries` 消费正常；
-4. 若自建 Agent 预设的 `allowed_tools` 显式列出旧工具名，改为 `search_knowledge`、`list_documents`、`read_document`、`todo_write`、`calculate`。
-
 ### 2026-10-15：通用知识库工具、摘要进度与 MCP 结构化反馈
 
 对应提交：
@@ -2458,3 +2376,92 @@ Artoo 远端调用: read_document
    - Artoo 文档：`read_document`
    - 业务文书：`law_read_document` 或实际配置前缀名
 5. Artoo 只负责把业务 MCP 的结构化结果传给宿主，不负责判断业务文档版本、锚点或审批状态。
+
+### 2026-10-16：统一召回、异步摘要制品、文档读取契约、Todo 与摘要预览
+
+#### 13.12 业务系统必须同步的变更
+
+如果业务系统**记录或展示** Artoo SSE 中的 `tool_call.tool_name` / `tool_result.tool_name`，需要同步以下工具名映射：
+
+| 旧工具名 | 新工具名 | 说明 |
+| --- | --- | --- |
+| `knowledge_search` | `search_knowledge` | 唯一召回入口，新增 `mode` 参数 |
+| `grep_chunks` | `search_knowledge` | 精确关键词用 `mode="keyword"` |
+| `list_knowledge_chunks` | `read_document` | 改为字符 offset 分页与 query/regex 定位 |
+| `list_knowledge_documents` | `list_documents` | 新增 `keyword` 过滤与摘要状态 |
+| `summarize_documents` | `search_knowledge(mode="summary")` | 优先读取入库后异步生成的摘要制品 |
+
+`todo_write` 是 Agent 内部规划工具，不新增业务请求字段，也不改变对话请求/响应结构。业务系统只需要把未知工具名按通用 SSE 分支透传或忽略，不应硬编码旧工具名。
+
+#### 13.13 SSE 增量字段
+
+工具结果事件新增可选字段：
+
+```json
+{
+  "type": "tool_result",
+  "tool_name": "search_knowledge",
+  "retrieval_audit": {
+    "raw_count": 42,
+    "after_id_dedup": 40,
+    "after_signature_dedup": 37,
+    "after_near_duplicate_dedup": 34,
+    "expanded_count": 41,
+    "merged_count": 18,
+    "returned_count": 10,
+    "limit": 10,
+    "cutoff_applied": true
+  }
+}
+```
+
+该字段是审计与可观测性信息，不稳定作为业务事实；业务系统可以原样保存、忽略或用于展示检索截断提示。`files` 仍只包含本次工具读到的文件元数据。
+
+#### 13.14 异步摘要制品与对外预览接口
+
+正式文档和会话文件完成索引后，Artoo 会在独立队列 `pipeline:summaries` 中生成版本化摘要制品。摘要完成前：
+
+- `list_documents` 的 `summary_status` 为 `pending` / `processing` / `failed` / `missing`；
+- `search_knowledge(mode="summary")` 只返回已完成的摘要，并带有版本与截断审计；
+- 摘要失效由文档/会话内容版本驱动，版本变化会重新排队。
+
+摘要生成不在上传或解析请求中同步执行，不阻塞文件入库；部署侧需要让 worker 进程启动摘要 lane，并保证 Redis Stream 可用。摘要失败不会回滚文档入库。
+
+业务系统可调用只读预览接口：
+
+```http
+GET /api/documents/{doc_id}/summary
+Authorization: Bearer <API Key>
+X-External-User-Id: <业务用户ID>   # 代理 Key 必带
+```
+
+```json
+{
+  "doc_id": "doc-1",
+  "status": "completed",
+  "summary": "文档核心摘要",
+  "gist": "一句话摘要",
+  "topics": ["主题一", "主题二"],
+  "doc_type": "操作手册",
+  "typical_question": "如何使用该文档？",
+  "content_version": "sha256",
+  "chunk_count": 3,
+  "generated_at": "2026-10-16T00:00:00+00:00"
+}
+```
+
+当摘要尚未生成时返回 `status="missing"`；`pending` / `processing` / `failed` 也会原样返回。该接口只读取 `document_summaries`，不会触发摘要任务，也不会阻塞上传、解析、索引或其他文档操作。完整接口说明见 4.12。
+
+#### 13.15 两个 `read_document` 的边界保持不变
+
+Artoo 内置 `read_document` 只读取 Artoo 授权的知识库文档和当前会话文件，按 `doc_id` / `chunk_id`、`offset`、`query` / `regex` 工作。业务系统 MCP 提供的 `read_document` 仍用于业务产物文书、业务版本和业务锚点，两者资源域与权限域不同。
+
+#### 13.16 兼容性与迁移
+
+本版本按“新部署、新预设、新数据”设计，不承诺旧 Artoo 工具名继续注册到模型。业务侧不需要迁移对话流程；只需要：
+
+1. 若读取 SSE 工具名，更新映射表；
+2. 若保存 `agent_steps`，允许 `retrieval_audit` 等新增可选字段；
+3. 部署 worker 并确认 `pipeline:summaries` 消费正常；
+4. 若自建 Agent 预设的 `allowed_tools` 显式列出旧工具名，改为 `search_knowledge`、`list_documents`、`read_document`、`todo_write`、`calculate`；
+5. 如需展示摘要预览，可选调用 4.12 的只读接口；不调用不影响原有对话和文件流程。
