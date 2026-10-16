@@ -16,8 +16,8 @@ class AgentConfig:
 
     # 允许使用的工具列表（白名单）
     allowed_tools: list[str] = field(default_factory=lambda: [
-        "knowledge_search", "grep_chunks", "list_knowledge_chunks", "read_document",
-        "list_knowledge_documents", "summarize_documents", "calculate",
+        "search_knowledge", "list_documents", "read_document", "todo_write",
+        "calculate",
     ])
 
     # LLM 生成温度
@@ -70,6 +70,13 @@ class AgentConfig:
 
     # LLM 单次调用超时时间（秒）
     llm_call_timeout: int = 120
+
+    # P1: stream stall watchdog. The timeout resets on every provider chunk,
+    # so long but healthy generations are not killed by a total-duration limit.
+    llm_stall_timeout: float = 45.0
+
+    # P1: durably reuse compacted context across turns.
+    compaction_checkpoint_enabled: bool = True
 
     # 工具输出最大字符数，超过时截断（保留头尾）
     max_tool_output_chars: int = 16000

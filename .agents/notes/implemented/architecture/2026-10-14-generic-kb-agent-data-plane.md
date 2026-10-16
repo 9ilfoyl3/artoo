@@ -20,6 +20,10 @@ in this layer.
 
 ## Decision
 
+Superseded by
+[Unified recall and durable summary artifacts](2026-10-16-unified-recall-and-summary-artifacts.md)
+for the model-facing tool names and summary lifecycle described below.
+
 The generic knowledge-base Agent gains a deterministic retrieval and collection
 data plane.
 

@@ -185,6 +185,7 @@ class DocumentPipeline:
         ocr_manager: OCRManager | None = None,
         asr_manager: "ASRManager | None" = None,
         graph_queue: "TaskQueue | None" = None,
+        summary_queue: object | None = None,
     ):
         self.milvus = milvus_client
         self.db_session_factory = db_session_factory
@@ -193,6 +194,9 @@ class DocumentPipeline:
         # 知识图谱抽取慢道队列（pipeline:graph）。None 表示未启用/不可用 → 文档完成后
         # 不触发图谱抽取（优雅降级，主链路零影响）。
         self.graph_queue = graph_queue
+        # Durable document-profile generation lane. Summary failures never
+        # affect ingestion, so this dependency is optional and best-effort.
+        self.summary_queue = summary_queue
         # 初始化管道各节点
         self.enricher = Enricher(llm=None, enabled=False)
         settings = get_settings()
@@ -942,6 +946,11 @@ class DocumentPipeline:
                 # 文档入库完成后非阻塞触发知识图谱抽取（双开关 + 队列门控，任何故障不影响
                 # 主入库结果；fire-and-forget 不阻塞 process 返回）。Req 1.1 / 1.2 / 4.1。
                 self._fire_graph_extract(doc_id=doc_id, kb_id=kb_id, tenant_id=kb_tenant_id)
+                self._fire_document_summary(
+                    doc_id=doc_id,
+                    kb_id=kb_id,
+                    tenant_id=kb_tenant_id,
+                )
 
                 total_duration_ms = int((time.monotonic() - pipeline_start) * 1000)
                 pl.summary(total_duration_ms)
@@ -1028,6 +1037,41 @@ class DocumentPipeline:
                 )
             except Exception as e:  # noqa: BLE001 — 图谱触发失败绝不影响主入库结果
                 logger.warning("文档 %s 触发知识图谱抽取失败（已忽略，不影响入库）: %s", doc_id, e)
+
+        asyncio.create_task(_run())
+
+    def _fire_document_summary(
+        self,
+        *,
+        doc_id: str,
+        kb_id: str,
+        tenant_id: str | None,
+    ) -> None:
+        """Schedule durable summary generation without blocking ingestion."""
+        if self.summary_queue is None:
+            return
+
+        from app.summary.service import schedule_document_summary
+        from app.summary.queue import set_document_summary_queue
+
+        # The worker/API process that created the pipeline already injected the
+        # singleton; setting again here keeps fallback pipelines consistent.
+        set_document_summary_queue(self.summary_queue)  # type: ignore[arg-type]
+
+        async def _run() -> None:
+            try:
+                await schedule_document_summary(
+                    source="document",
+                    doc_id=doc_id,
+                    kb_id=kb_id,
+                    tenant_id=tenant_id,
+                )
+            except Exception as exc:  # noqa: BLE001 - summary is best-effort
+                logger.warning(
+                    "Document %s summary schedule failed (ignored): %s",
+                    doc_id,
+                    exc,
+                )
 
         asyncio.create_task(_run())
 

@@ -10,9 +10,9 @@ describe('MessageBubble tool progress', () => {
       segments: [
         {
           type: 'tool_call',
-          content: 'summarize_documents',
+          content: 'search_knowledge',
           toolCallId: 'call-1',
-          toolName: 'summarize_documents',
+          toolName: 'search_knowledge',
           progress: {
             phase: 'document',
             completed: 4,

@@ -338,7 +338,8 @@ def test_tool_registry_preserves_structured_content_when_text_is_truncated():
 
     result = asyncio.run(registry.execute("structured", {}))
 
-    assert "[...truncated" in result.output
+    assert result.output.startswith("[...trunca")
+    assert len(result.output) <= 10
     assert result.structured_content == {
         "kind": "dev.artoo.test.structured.v1",
         "data": {"value": "kept"},

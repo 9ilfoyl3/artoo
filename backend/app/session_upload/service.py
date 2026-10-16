@@ -705,6 +705,22 @@ class SessionUploadService:
             await self._safe_cleanup_vectors(file_id)
             raise
 
+        try:
+            from app.summary.service import schedule_document_summary
+
+            await schedule_document_summary(
+                source="session-file",
+                doc_id=file_id,
+                session_id=session_id,
+                tenant_id=tenant_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - summary is best-effort
+            logger.warning(
+                "会话文件 %s 摘要调度失败（不影响建索引）: %s",
+                file_id,
+                exc,
+            )
+
         return child_count
 
     async def process_task(self, task: SessionUploadTask) -> None:
@@ -890,6 +906,13 @@ class SessionUploadService:
             await session.delete(row)
             await session.commit()
 
+        try:
+            from app.summary.service import delete_document_summary
+
+            await delete_document_summary("session-file", file_id)
+        except Exception as exc:  # noqa: BLE001 - cleanup is best-effort
+            logger.warning("会话文件 %s 摘要清理失败（非致命）: %s", file_id, exc)
+
         # 删 MinIO 原件（按 session_id/file_id/ext 拼 key）。失败仅记 WARNING。
         await self._safe_remove_object(
             session_file_object_key(session_id, file_id, ext)
@@ -928,6 +951,13 @@ class SessionUploadService:
                 await store.remove_prefix(session_prefix(session_id))
         except Exception as e:
             logger.warning("会话 %s MinIO 原件清理失败（非致命）: %s", session_id, e)
+
+        try:
+            from app.summary.service import delete_session_summaries
+
+            await delete_session_summaries(session_id)
+        except Exception as e:
+            logger.warning("会话 %s 摘要清理失败（非致命）: %s", session_id, e)
 
         try:
             async with self._db_session_factory() as session:

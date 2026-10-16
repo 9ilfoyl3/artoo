@@ -17,11 +17,10 @@ description: 把长文档、会议记录、报告提炼为结构化摘要。当�
 
 ## 工作流程
 
-1. **判断范围**：明确要摘要的是整篇文档、整个知识库，还是某主题。涉及整个知识库或多份文档时，先调用 `list_knowledge_documents` 获取权威文档清单；只有主题定位时才先用 `knowledge_search` / `grep_chunks` 检索。
+1. **判断范围**：明确要摘要的是整篇文档、整个知识库，还是某主题。涉及整个知识库或多份文档时，先调用 `list_documents` 获取权威文档清单；主题定位用 `search_knowledge`。
 2. **选择读取路径**：
-   - 多文档或全库摘要：调用 `summarize_documents`，并只使用清单返回的 `doc_ids`。核心摘要统一传 `cache_scope="core-points"`；每份文档会在独立上下文中处理，避免把全部原文塞入主上下文。
-   - 单文档精读：调用 `read_document`，按返回的 `next_page` 继续读取，直到 `fully_read=true`。
-   - 若当前预设未提供上述工具，再退化为 `knowledge_search` / `grep_chunks` + `list_knowledge_chunks`。
+   - 多文档或全库摘要：调用 `search_knowledge(mode="summary")`，优先使用文档入库后异步生成的摘要制品。
+   - 单文档精读：调用 `read_document`，按返回的 `next_offset` 继续读取，直到 `fully_read=true`。
 3. **确认覆盖**：不得从搜索未命中推断文档不存在。报告未读取、不可用或超出范围的文档。
 4. **分层提炼**：梳理结构，区分"核心结论""关键论据""决议事项""待办行动项"。
 5. **输出结构化摘要**：按层次组织，重点在前。

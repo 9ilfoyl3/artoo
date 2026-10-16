@@ -139,12 +139,10 @@ _BUILTIN_PRESETS = [
             "parallel_tool_calls": True,
             "temperature": 0.7,
             "allowed_tools": [
-                "knowledge_search",
-                "grep_chunks",
-                "list_knowledge_chunks",
+                "search_knowledge",
+                "list_documents",
                 "read_document",
-                "list_knowledge_documents",
-                "summarize_documents",
+                "todo_write",
                 "calculate",
             ],
         },
@@ -166,34 +164,24 @@ _BUILTIN_PRESETS = [
 
 _BUILTIN_TOOL_CATALOG: list[dict] = [
     {
-        "name": "knowledge_search",
-        "label": "语义检索",
-        "description": "在所选知识库与会话文件中做向量 + 稀疏混合检索",
+        "name": "search_knowledge",
+        "label": "统一召回",
+        "description": "唯一召回入口，支持 hybrid / semantic / keyword / summary 四种模式",
     },
     {
-        "name": "list_knowledge_documents",
+        "name": "list_documents",
         "label": "文档清单",
-        "description": "列出当前授权知识库与会话文件中的文档，供全量摘要、覆盖检查与文件发现使用",
-    },
-    {
-        "name": "grep_chunks",
-        "label": "关键词检索",
-        "description": "在主知识库内按关键词精确匹配分块",
-    },
-    {
-        "name": "list_knowledge_chunks",
-        "label": "分页浏览（兼容）",
-        "description": "旧版分页读取工具；新预设建议使用 read_document",
+        "description": "列出当前授权知识库与会话文件中的文档，并标记异步摘要状态",
     },
     {
         "name": "read_document",
-        "label": "完整读取",
-        "description": "按 doc_id 分页读取完整文档，并返回 fully_read 覆盖状态",
+        "label": "文档阅读",
+        "description": "按 doc_id/chunk_id 分页或按 query/regex 精确读取文档",
     },
     {
-        "name": "summarize_documents",
-        "label": "文档摘要",
-        "description": "按 doc_id 并行生成单文档摘要，适合全库总结与跨文档汇总",
+        "name": "todo_write",
+        "label": "任务清单",
+        "description": "为多步任务维护有界 Todo 规划状态",
     },
     {
         "name": "calculate",

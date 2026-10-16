@@ -8,7 +8,7 @@ import unicodedata
 from dataclasses import dataclass
 
 REPEAT_TOOL_REMINDER_THRESHOLDS = (3, 5, 8)
-_RETRIEVAL_TOOLS = {"knowledge_search", "grep_chunks", "search_knowledge_base"}
+_RETRIEVAL_TOOLS = {"search_knowledge"}
 _WHITESPACE_RE = re.compile(r"\s+")
 
 

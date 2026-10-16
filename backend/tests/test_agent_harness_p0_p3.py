@@ -107,11 +107,11 @@ def test_query_normalization_and_deduplication() -> None:
         "qux",
     ]
     assert canonical_tool_signature(
-        "knowledge_search",
-        {"queries": ["b", "a"], "top_k": 5},
+        "search_knowledge",
+        {"query": "CLAUSE 566", "mode": "hybrid", "limit": 5},
     ) == canonical_tool_signature(
-        "knowledge_search",
-        {"queries": ["a", "b"], "top_k": 5},
+        "search_knowledge",
+        {"query": "clause 566", "mode": "hybrid", "limit": 5},
     )
 
 

@@ -533,6 +533,9 @@ class MCPToolWrapper(BaseTool):
 
     # 声明本工具需要调用期上下文，ToolRegistry 据此决定是否传 ctx
     accepts_context = True
+    # Remote tools may have side effects; serialize them unless a future MCP
+    # annotation explicitly proves otherwise.
+    read_only = False
 
     def __init__(
         self,

@@ -10,6 +10,10 @@ Agent 此前只有搜索与读取工具，没有确定性的文档发现面。�
 
 ## Decision
 
+模型可见工具名与摘要生命周期已由
+[Unified recall and durable summary artifacts](2026-10-16-unified-recall-and-summary-artifacts.zh.md)
+取代，下文中相关描述保留为历史决策记录。
+
 通用知识库 Agent 增加确定性的检索与集合数据面。
 
 `list_knowledge_documents` 列出已授权正式 KB 与可选会话文件源，返回稳定的 `doc_id`、文件名、类型、状态、来源、KB ID 和索引 chunk 数，并支持分页。结果写入 `AgentState.document_catalog`。

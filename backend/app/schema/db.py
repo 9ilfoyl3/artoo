@@ -114,6 +114,65 @@ class Chunk(Base, TenantScopedMixin):
     knowledge_base: Mapped["KnowledgeBase"] = relationship(back_populates="chunks")
 
 
+class DocumentSummary(Base, TenantScopedMixin):
+    """Versioned, retrieval-ready document summary artifact.
+
+    This table owns the durable summary/profile projection. The Redis summary
+    cache may disappear; this record is the source used by Agent retrieval and
+    document discovery. ``source`` distinguishes formal documents from session
+    files because their IDs live in different tables.
+    """
+
+    __tablename__ = "document_summaries"
+    __table_args__ = (
+        UniqueConstraint("source", "doc_id", name="uq_document_summaries_source_doc"),
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    source: Mapped[str] = mapped_column(String(32), nullable=False)  # document | session-file
+    doc_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    kb_id: Mapped[Optional[str]] = mapped_column(String, nullable=True, index=True)
+    session_id: Mapped[Optional[str]] = mapped_column(String, nullable=True, index=True)
+    filename: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    content_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)
+    summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    gist: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    topics: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    doc_type: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    typical_question: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    chunk_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    model_key: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    generated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class AgentCompactionCheckpoint(Base, TenantScopedMixin):
+    """Durable compacted context for one chat session.
+
+    The checkpoint stores the exact model-visible message prefix plus a cursor
+    identifying the final message covered by the snapshot. A later turn only
+    reuses it when the same cursor still exists in persisted chat history.
+    """
+
+    __tablename__ = "agent_compaction_checkpoints"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    session_id: Mapped[str] = mapped_column(String, unique=True, nullable=False, index=True)
+    prompt_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    cursor: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    messages: Mapped[list] = mapped_column(JSON, nullable=False)
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
 class ApiKey(Base, TenantScopedMixin):
     """API Key 表"""
     __tablename__ = "api_keys"

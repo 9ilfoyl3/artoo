@@ -61,7 +61,7 @@ class _MemorySummaryCache:
 class _SuggestRewriteTool(BaseTool):
     @property
     def name(self) -> str:
-        return "knowledge_search"
+        return "search_knowledge"
 
     @property
     def description(self) -> str:
@@ -82,7 +82,7 @@ class _SuggestRewriteTool(BaseTool):
 class _InventoryStubTool(BaseTool):
     @property
     def name(self) -> str:
-        return "list_knowledge_documents"
+        return "list_documents"
 
     @property
     def description(self) -> str:
@@ -103,13 +103,13 @@ class _InventoryAwareLLM:
     async def stream_with_tools(self, messages, tools, **kwargs):
         self.calls += 1
         if any(
-            "list_knowledge_documents to verify" in (message.get("content") or "")
+            "list_documents to verify" in (message.get("content") or "")
             for message in messages
         ):
             yield StreamChunk(content="finished", finish_reason="stop")
             return
         yield StreamChunk(
-            tool_calls=[LLMToolCall("call-1", "knowledge_search", "{}")],
+            tool_calls=[LLMToolCall("call-1", "search_knowledge", "{}")],
             finish_reason="tool_calls",
         )
 
@@ -150,9 +150,10 @@ def test_builtin_smart_reasoning_preset_upgrades_to_new_kb_tools(
                 assert preset is not None
                 assert preset.config_json["custom_rollout_flag"] is True
                 assert {
-                    "list_knowledge_documents",
+                    "search_knowledge",
+                    "list_documents",
                     "read_document",
-                    "summarize_documents",
+                    "todo_write",
                     "calculate",
                 }.issubset(set(preset.config_json["allowed_tools"]))
         finally:
@@ -275,12 +276,12 @@ def test_empty_retrieval_falls_back_to_document_inventory_once():
 def test_prompt_guides_collection_tasks_when_catalog_tool_is_available():
     prompt = render_system_prompt(
         AgentConfig(),
-        available_tools=["list_knowledge_documents", "summarize_documents"],
+        available_tools=["list_documents", "search_knowledge"],
     )
 
     assert "Document collection tasks" in prompt
     assert "Never infer missing files" in prompt
-    assert "summarize_documents" in prompt
+    assert "mode=summary" in prompt
 
 
 def test_summary_skills_prefer_catalog_and_document_tools():
@@ -295,9 +296,9 @@ def test_summary_skills_prefer_catalog_and_document_tools():
         instructions = (skill_root / skill_name / "SKILL.md").read_text(
             encoding="utf-8"
         )
-        assert "list_knowledge_documents" in instructions
+        assert "list_documents" in instructions
         assert "read_document" in instructions
-        assert "summarize_documents" in instructions
+        assert 'search_knowledge(mode="summary")' in instructions
 
 
 def test_deterministic_calculator_uses_decimal_and_rejects_unsafe_input():

@@ -29,13 +29,12 @@ from app.agent.events import AgentEvent, EventBus, EventType
 from app.agent.state import AgentState
 from app.agent.tools.base import ToolContext
 from app.agent.tools.calculator import CalculateTool
-from app.agent.tools.grep_chunks import GrepChunksTool
-from app.agent.tools.knowledge_search import KnowledgeSearchTool, SearchTarget
-from app.agent.tools.list_chunks import ListKnowledgeChunksTool, ReadDocumentTool
-from app.agent.tools.list_documents import ListKnowledgeDocumentsTool
+from app.agent.tools.list_documents import ListDocumentsTool
+from app.agent.tools.read_document import ReadDocumentTool
 from app.agent.tools.read_attachment import ReadAttachmentTool
 from app.agent.tools.read_skill import ReadSkillTool
-from app.agent.tools.summarize_documents import SummarizeDocumentsTool
+from app.agent.tools.search_knowledge import SearchKnowledgeTool, SearchTarget
+from app.agent.tools.todo import TodoWriteTool
 from app.agent.tools.web_search import WebSearchTool
 from app.agent.tools.registry import ToolRegistry
 from app.agent.tools.mcp_client import get_mcp_tools
@@ -962,6 +961,9 @@ def _agent_event_to_sse(event: AgentEvent) -> dict | None:
         if structured_content is not None:
             # MCP 声明的结构化结果经通用校验后透传；原始工具正文仍不外发。
             sse_data["structured_content"] = structured_content
+        retrieval_audit = event.data.get("retrieval_audit")
+        if retrieval_audit is not None:
+            sse_data["retrieval_audit"] = retrieval_audit
         return sse_data
     elif event.type == EventType.TURN_END:
         return {
@@ -1108,7 +1110,18 @@ async def _build_agent_runtime(
         retrieval_cache = await get_retrieval_cache()
 
     state = AgentState()
-    tool_registry = ToolRegistry()
+    tool_registry = ToolRegistry(
+        output_budgets={
+            "search_knowledge": 14_000,
+            "list_documents": 8_000,
+            "read_document": 20_000,
+            "read_attachment": 16_000,
+            "read_skill": 8_000,
+            "todo_write": 4_000,
+            "calculate": 4_000,
+            "web_search": 8_000,
+        }
+    )
     event_bus = EventBus()
 
     # 主库：grep_chunks / list_knowledge_chunks 这类单库工具的归属库（kb_ids 为空时为 None）。
@@ -1133,36 +1146,37 @@ async def _build_agent_runtime(
             return True
         return tool_name in preset_allowed
 
-    if _tool_enabled("knowledge_search") and search_targets:
+    if _tool_enabled("search_knowledge") and search_targets:
         tool_registry.register(
-            KnowledgeSearchTool(
+            SearchKnowledgeTool(
                 hybrid_retriever,
                 state=state,
                 tenant_id=tenant_id,
                 search_targets=search_targets,
-                dedupe_queries_enabled=preset_cfg.get("query_dedup_enabled", True),
-                max_queries_per_call=preset_cfg.get("max_queries_per_call", 3),
                 cache=retrieval_cache,
+                session_id=session_id,
             )
         )
-    if _tool_enabled("list_knowledge_documents"):
+    if _tool_enabled("list_documents"):
         tool_registry.register(
-            ListKnowledgeDocumentsTool(
+            ListDocumentsTool(
                 kb_ids=kb_ids,
                 session_id=session_id,
                 include_session_source=include_session_source,
                 state=state,
             )
         )
-    # grep_chunks / list_knowledge_chunks 仅作用于主库，不接会话源（design C2 决策，非遗漏）。
-    if _tool_enabled("grep_chunks") and primary_kb_id:
-        tool_registry.register(GrepChunksTool(bm25_retriever, primary_kb_id, state))
     if _tool_enabled("read_document"):
-        tool_registry.register(ReadDocumentTool(state=state))
-    elif _tool_enabled("list_knowledge_chunks"):
-        tool_registry.register(ListKnowledgeChunksTool(state=state))
-    if _tool_enabled("summarize_documents"):
-        tool_registry.register(SummarizeDocumentsTool(llm=llm, state=state))
+        tool_registry.register(
+            ReadDocumentTool(
+                kb_ids=kb_ids,
+                session_id=session_id,
+                include_session_source=include_session_source,
+                state=state,
+            )
+        )
+    if _tool_enabled("todo_write"):
+        tool_registry.register(TodoWriteTool(state=state))
     if _tool_enabled("calculate"):
         tool_registry.register(CalculateTool())
     # read_attachment：本条消息绑定附件 → 注册确定性整篇直读工具。file_id 在此锚定
@@ -1256,6 +1270,12 @@ async def _build_agent_runtime(
         query_rewrite_max_attempts=preset_cfg.get("query_rewrite_max_attempts", 1),
         context_pruning_enabled=preset_cfg.get("context_pruning_enabled", True),
         retrieval_cache_enabled=preset_cfg.get("retrieval_cache_enabled", True),
+        compaction_checkpoint_enabled=preset_cfg.get(
+            "compaction_checkpoint_enabled", True
+        ),
+        llm_stall_timeout=preset_cfg.get(
+            "llm_stall_timeout", AgentConfig.llm_stall_timeout
+        ),
         reasoning_effort=(preset_cfg.get("reasoning_effort") or None),
     )
     # caller_ctx 交给引擎：执行工具时按需下传（仅外部 MCP 工具消费，用于把调用方身份

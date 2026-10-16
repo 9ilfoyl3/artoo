@@ -97,6 +97,10 @@ class BaseTool(ABC):
     # ToolRegistry 据此决定调用 execute(args) 还是 execute(args, ctx=...)。
     accepts_context: bool = False
 
+    # Read-only tools may execute concurrently with each other. Tools that
+    # mutate documents, external systems, or Agent state opt out.
+    read_only: bool = True
+
     @property
     @abstractmethod
     def name(self) -> str:

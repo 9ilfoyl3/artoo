@@ -60,7 +60,7 @@ const emptyForm: FormData = {
   temperature: '0.7',
   thinking_enabled: true,
   parallel_tool_calls: false,
-  allowed_tools: ['knowledge_search', 'grep_chunks', 'list_knowledge_chunks', 'read_document', 'list_knowledge_documents', 'summarize_documents', 'calculate'],
+  allowed_tools: ['search_knowledge', 'list_documents', 'read_document', 'todo_write', 'calculate'],
   custom_instructions: '',
   is_shared: false,
 }

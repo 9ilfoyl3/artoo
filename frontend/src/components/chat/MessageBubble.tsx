@@ -489,9 +489,10 @@ function formatToolProgress(progress: ToolProgress): string {
 
 // 工具名 → 中文标签映射（步骤行展示用，与 AgentConfig 的 ALL_TOOLS 保持一致）
 const TOOL_LABELS: Record<string, string> = {
-  knowledge_search: '语义检索',
-  grep_chunks: '关键词检索',
-  list_knowledge_chunks: '分页浏览',
+  search_knowledge: '知识召回',
+  list_documents: '文档清单',
+  read_document: '阅读文档',
+  todo_write: '任务清单',
   web_search: '网页搜索',
   read_attachment: '阅读附件',
   read_skill: '加载技能',

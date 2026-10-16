@@ -58,14 +58,14 @@ def truncate_tool_output(output: str, max_chars: int) -> str:
     if len(output) <= max_chars:
         return output
 
-    head_size = int(len(output) * 0.4)
-    tail_size = int(len(output) * 0.4)
-    truncated_count = len(output) - head_size - tail_size
-
+    truncated_count = len(output)
+    marker = f"[...truncated {truncated_count} chars...]"
+    kept = max(0, max_chars - len(marker))
+    head_size = kept // 2
+    tail_size = kept - head_size
     head = output[:head_size]
-    tail = output[-tail_size:]
-
-    return f"{head}[...truncated {truncated_count} chars...]{tail}"
+    tail = output[-tail_size:] if tail_size else ""
+    return f"{head}{marker}{tail}"[:max_chars]
 
 
 def prune_tool_output(output: str, head_chars: int, tail_chars: int) -> str:
@@ -84,10 +84,10 @@ def prune_tool_output(output: str, head_chars: int, tail_chars: int) -> str:
 def redact_historical_kb_results(
     messages: list[dict], current_iteration: int
 ) -> list[dict]:
-    """将非当前轮次的 knowledge_search/grep_chunks 工具结果替换为占位符
+    """将非当前轮次的 search_knowledge 工具结果替换为占位符
 
     遍历消息列表，找到 role="tool" 的消息，检查其前面的 assistant 消息中
-    对应的 tool_call 是否为 knowledge_search 或 grep_chunks。
+    对应的 tool_call 是否为 search_knowledge。
     如果该工具调用属于之前的迭代（非 current_iteration），则替换内容。
 
     通过追踪 assistant 消息中的 tool_calls 来确定迭代归属：
@@ -100,7 +100,7 @@ def redact_historical_kb_results(
     Returns:
         处理后的消息列表
     """
-    kb_tools = {"knowledge_search", "grep_chunks"}
+    kb_tools = {"search_knowledge"}
 
     # 追踪每个 tool_call_id 属于哪个迭代
     tool_call_iterations: dict[str, int] = {}

@@ -14,7 +14,7 @@ from sqlalchemy import func, literal, select, union_all
 
 from app.agent.state import AgentState
 from app.agent.tools.base import BaseTool, ToolResult
-from app.schema.db import Document, SessionFile
+from app.schema.db import Document, DocumentSummary, SessionFile
 from app.storage.database import async_session
 
 logger = logging.getLogger(__name__)
@@ -23,7 +23,7 @@ _DEFAULT_PAGE_SIZE = 50
 _MAX_PAGE_SIZE = 100
 
 
-class ListKnowledgeDocumentsTool(BaseTool):
+class ListDocumentsTool(BaseTool):
     """Enumerate formal KB documents and optional session files."""
 
     def __init__(
@@ -41,7 +41,7 @@ class ListKnowledgeDocumentsTool(BaseTool):
 
     @property
     def name(self) -> str:
-        return "list_knowledge_documents"
+        return "list_documents"
 
     @property
     def description(self) -> str:
@@ -82,6 +82,10 @@ class ListKnowledgeDocumentsTool(BaseTool):
                         "Optional document status filter. Omit to list every status."
                     ),
                 },
+                "keyword": {
+                    "type": "string",
+                    "description": "Optional case-insensitive filename keyword.",
+                },
             },
         }
 
@@ -90,6 +94,7 @@ class ListKnowledgeDocumentsTool(BaseTool):
         page_size = int(args.get("page_size") or _DEFAULT_PAGE_SIZE)
         page_size = max(1, min(page_size, _MAX_PAGE_SIZE))
         status = str(args.get("status") or "").strip()
+        keyword = str(args.get("keyword") or "").strip()
 
         requested = args.get("kb_ids")
         kb_ids = self._kb_ids
@@ -115,6 +120,10 @@ class ListKnowledgeDocumentsTool(BaseTool):
                     document_conditions = [Document.kb_id.in_(kb_ids)]
                     if status:
                         document_conditions.append(Document.status == status)
+                    if keyword:
+                        document_conditions.append(
+                            Document.filename.ilike(f"%{keyword}%")
+                        )
                     selects.append(
                         select(
                             Document.id.label("doc_id"),
@@ -131,6 +140,10 @@ class ListKnowledgeDocumentsTool(BaseTool):
                     session_conditions = [SessionFile.session_id == self._session_id]
                     if status:
                         session_conditions.append(SessionFile.status == status)
+                    if keyword:
+                        session_conditions.append(
+                            SessionFile.filename.ilike(f"%{keyword}%")
+                        )
                     selects.append(
                         select(
                             SessionFile.id.label("doc_id"),
@@ -167,10 +180,31 @@ class ListKnowledgeDocumentsTool(BaseTool):
                         .limit(page_size)
                     )
                 ).mappings().all()
+
+                doc_ids = [row["doc_id"] for row in rows]
+                summary_rows = []
+                if doc_ids:
+                    summary_rows = (
+                        await session.execute(
+                            select(
+                                DocumentSummary.source,
+                                DocumentSummary.doc_id,
+                                DocumentSummary.status,
+                                DocumentSummary.gist,
+                            ).where(DocumentSummary.doc_id.in_(doc_ids))
+                        )
+                    ).all()
         except Exception as exc:
-            logger.exception("[ListKnowledgeDocuments] query failed: %s", exc)
+            logger.exception("[ListDocuments] query failed: %s", exc)
             return ToolResult(success=False, error=f"Failed to list documents: {exc}")
 
+        summary_map = {
+            (row.source, row.doc_id): {
+                "summary_status": row.status,
+                "gist": row.gist,
+            }
+            for row in summary_rows
+        }
         documents = [
             {
                 "doc_id": row["doc_id"],
@@ -181,6 +215,10 @@ class ListKnowledgeDocumentsTool(BaseTool):
                 "chunk_count": row["chunk_count"],
                 "kb_id": row["kb_id"] or None,
                 "source": row["source"],
+                **summary_map.get(
+                    (row["source"], row["doc_id"]),
+                    {"summary_status": None, "gist": None},
+                ),
             }
             for row in rows
         ]
@@ -206,6 +244,7 @@ class ListKnowledgeDocumentsTool(BaseTool):
                 f'type="{xml_escape(document["file_type"] or "")}"',
                 f'status="{xml_escape(document["status"] or "")}"',
                 f'chunk_count="{document["chunk_count"] or 0}"',
+                f'summary_status="{xml_escape(document["summary_status"] or "missing")}"',
             ]
             if document["kb_id"]:
                 attrs.append(f'kb_id="{xml_escape(document["kb_id"])}"')
@@ -213,7 +252,7 @@ class ListKnowledgeDocumentsTool(BaseTool):
         lines.append("</documents>")
         if next_page is not None:
             lines.append(
-                f"[More documents are available. Call list_knowledge_documents "
+                f"[More documents are available. Call list_documents "
                 f"again with page={next_page}.]"
             )
 
@@ -229,3 +268,8 @@ class ListKnowledgeDocumentsTool(BaseTool):
                 "next_page": next_page,
             },
         )
+
+
+# Internal import alias for code paths that still reference the old class name.
+# The model-facing name is intentionally only ``list_documents``.
+ListKnowledgeDocumentsTool = ListDocumentsTool
