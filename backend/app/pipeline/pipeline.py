@@ -66,6 +66,57 @@ def _has_low_quality_hybrid_text_layer(load_result: LoadResult) -> bool:
     )
 
 
+def _pdf_pages_requiring_ocr(
+    load_result: LoadResult, file_type: str
+) -> list[int]:
+    """返回 PDF 中需要整页 OCR 的页码。
+
+    只有当页面缺乏可信文本层且确实存在嵌入图片时才送 OCR。这样既覆盖扫描页和
+    “印刷表单 + 手写签名图”场景，又不会为纯短文本页或无内容页增加 OCR 成本。
+    """
+    if file_type.lower().strip(".") != "pdf":
+        return []
+    if not load_result.page_has_usable_text or not load_result.page_texts:
+        return []
+
+    page_numbers: list[int] = []
+    for page_idx, has_usable_text in enumerate(load_result.page_has_usable_text):
+        if has_usable_text:
+            continue
+        page_num = page_idx + 1
+        if any(image.page_or_index == page_num for image in load_result.images):
+            page_numbers.append(page_num)
+    return page_numbers
+
+
+def _merge_page_ocr(
+    load_result: LoadResult,
+    ocr_result: OCRResult,
+    requested_pages: list[int],
+) -> tuple[list[str], set[int]]:
+    """用 OCR 结果替换指定页，返回合并后的页文本和成功页集合。"""
+    requested = set(requested_pages)
+    ocr_pages: dict[int, str] = {}
+    for page in ocr_result.pages:
+        if page.page_num in requested and page.full_text.strip():
+            ocr_pages[page.page_num] = page.full_text
+
+    # 兼容未提供分页结构、但只请求单页的 Provider。
+    if not ocr_pages and ocr_result.full_text.strip() and len(requested_pages) == 1:
+        ocr_pages[requested_pages[0]] = ocr_result.full_text
+
+    merged_pages: list[str] = []
+    recognized_pages: set[int] = set()
+    for page_idx, original_text in enumerate(load_result.page_texts):
+        page_num = page_idx + 1
+        if page_num in ocr_pages:
+            merged_pages.append(ocr_pages[page_num])
+            recognized_pages.add(page_num)
+        else:
+            merged_pages.append(original_text)
+    return merged_pages, recognized_pages
+
+
 class CancelledError(Exception):
     """文档处理被取消（文档已删除或用户主动取消）"""
     pass
@@ -241,57 +292,132 @@ class DocumentPipeline:
 
             # ─── 2. OCR（与 process() 等价，但不更新 ProgressTracker / 不查 Document） ───
             stripped_content = load_result.content.strip()
-            low_quality_hybrid_text = _has_low_quality_hybrid_text_layer(load_result)
-            needs_ocr = (
-                not is_audio
-                and self.ocr_manager
-                and (
-                    not stripped_content
-                    or len(stripped_content) < 10
-                    or low_quality_hybrid_text
-                )
-            )
-            if needs_ocr:
-                if low_quality_hybrid_text:
+            selective_ocr_applied = False
+
+            if not is_audio and self.ocr_manager:
+                pdf_ocr_pages = _pdf_pages_requiring_ocr(load_result, ext)
+                if pdf_ocr_pages:
                     logger.info(
-                        "[%s=%s] 检测到低质量隐藏文本层，改走 OCR",
+                        "[%s=%s] 检测到 %d 个缺少可信文本层的页面，执行选择性整页 OCR: %s",
                         source_kind,
                         source_id,
+                        len(pdf_ocr_pages),
+                        pdf_ocr_pages,
                     )
-                # recognize_document 按 Provider 能力准备输入：接受 PDF 的服务整文件直送，
-                # 只接受图片的服务（如 PaddleOCR）由其内部按页渲染整页图片后逐页识别。
-                # pipeline 不感知能力细节，也不再靠"返回空再回落"在运行时试探。
-                ocr_result = await self.ocr_manager.recognize_document(file_path)
-                ocr_text = ocr_result.full_text.strip()
-                if ocr_text:
-                    load_result = LoadResult(
-                        content=ocr_result.full_text,
-                        metadata={
-                            **load_result.metadata,
-                            "ocr_provider": ocr_result.provider_name,
-                        },
-                        images=[],
+                    ocr_result = await self.ocr_manager.recognize_document(
+                        file_path, page_numbers=pdf_ocr_pages
                     )
-                elif stripped_content:
-                    logger.warning(
-                        "[%s=%s] OCR 未识别出文本，回退 PDF 文本层",
-                        source_kind,
-                        source_id,
+                    merged_pages, recognized_pages = _merge_page_ocr(
+                        load_result, ocr_result, pdf_ocr_pages
                     )
-                else:
-                    from app.api.errors import EmptyDocumentContentError
+                    if recognized_pages:
+                        original_blocks = load_result.page_blocks or []
+                        merged_blocks = [
+                            []
+                            if page_idx + 1 in recognized_pages
+                            else (
+                                original_blocks[page_idx]
+                                if page_idx < len(original_blocks)
+                                else []
+                            )
+                            for page_idx in range(len(merged_pages))
+                        ]
+                        merged_usable = [
+                            (
+                                True
+                                if page_idx + 1 in recognized_pages
+                                else (
+                                    load_result.page_has_usable_text[page_idx]
+                                    if page_idx < len(load_result.page_has_usable_text)
+                                    else False
+                                )
+                            )
+                            for page_idx in range(len(merged_pages))
+                        ]
+                        remaining_images = [
+                            image
+                            for image in load_result.images
+                            if image.page_or_index not in recognized_pages
+                        ]
+                        load_result = LoadResult(
+                            content="\n".join(merged_pages),
+                            metadata={
+                                **load_result.metadata,
+                                "ocr_provider": ocr_result.provider_name,
+                                "ocr_page_numbers": sorted(recognized_pages),
+                                "embedded_image_count": len(remaining_images),
+                            },
+                            images=remaining_images,
+                            page_texts=merged_pages,
+                            page_blocks=merged_blocks,
+                            page_heights=load_result.page_heights,
+                            page_has_usable_text=merged_usable,
+                        )
+                        selective_ocr_applied = True
+                    else:
+                        logger.warning(
+                            "[%s=%s] 选择性整页 OCR 未识别出文本，保留原始文本层",
+                            source_kind,
+                            source_id,
+                        )
 
-                    raise EmptyDocumentContentError(
-                        "文档提取文本为空，且 OCR 未识别出内容"
+            if selective_ocr_applied:
+                needs_ocr = True
+                stripped_content = load_result.content.strip()
+            else:
+                low_quality_hybrid_text = _has_low_quality_hybrid_text_layer(load_result)
+                needs_ocr = (
+                    not is_audio
+                    and self.ocr_manager
+                    and (
+                        not stripped_content
+                        or len(stripped_content) < 10
+                        or low_quality_hybrid_text
                     )
-            elif not is_audio and (not stripped_content or len(stripped_content) < 10):
-                if not self.ocr_manager:
-                    # 无可提取文本且未配置 OCR：业务输入问题而非服务端故障。
-                    # 会话同步路径透出后由全局 handler 映射 422；KB 异步路径被
-                    # except Exception 捕获并置文档 failed（两路径行为均符合预期）。
-                    from app.api.errors import EmptyDocumentContentError
+                )
+                if needs_ocr:
+                    if low_quality_hybrid_text:
+                        logger.info(
+                            "[%s=%s] 检测到低质量隐藏文本层，改走 OCR",
+                            source_kind,
+                            source_id,
+                        )
+                    # recognize_document 按 Provider 能力准备输入：接受 PDF 的服务整文件直送，
+                    # 只接受图片的服务（如 PaddleOCR）由其内部按页渲染整页图片后逐页识别。
+                    # pipeline 不感知能力细节，也不再靠"返回空再回落"在运行时试探。
+                    ocr_result = await self.ocr_manager.recognize_document(file_path)
+                    ocr_text = ocr_result.full_text.strip()
+                    if ocr_text:
+                        load_result = LoadResult(
+                            content=ocr_result.full_text,
+                            metadata={
+                                **load_result.metadata,
+                                "ocr_provider": ocr_result.provider_name,
+                            },
+                            images=[],
+                        )
+                    elif stripped_content:
+                        logger.warning(
+                            "[%s=%s] OCR 未识别出文本，回退 PDF 文本层",
+                            source_kind,
+                            source_id,
+                        )
+                    else:
+                        from app.api.errors import EmptyDocumentContentError
 
-                    raise EmptyDocumentContentError("文档提取文本为空，且未配置 OCR 服务")
+                        raise EmptyDocumentContentError(
+                            "文档提取文本为空，且 OCR 未识别出内容"
+                        )
+                elif not is_audio and (not stripped_content or len(stripped_content) < 10):
+                    if not self.ocr_manager:
+                        # 无可提取文本且未配置 OCR：业务输入问题而非服务端故障。
+                        # 会话同步路径透出后由全局 handler 映射 422；KB 异步路径被
+                        # except Exception 捕获并置文档 failed（两路径行为均符合预期）。
+                        from app.api.errors import EmptyDocumentContentError
+
+                        raise EmptyDocumentContentError(
+                            "文档提取文本为空，且未配置 OCR 服务"
+                        )
 
             final_content = load_result.content
             if load_result.images and self.ocr_manager:

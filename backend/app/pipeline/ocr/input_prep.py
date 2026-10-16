@@ -37,12 +37,14 @@ class PreparedInput:
     Attributes:
         kind: ``"whole"`` 整文件直送；``"pages"`` 按页图片逐页识别。
         paths: 待识别文件路径；``pages`` 时按页序排列。
+        page_numbers: ``paths`` 对应的原始 PDF 页码（从 1 开始）。
         temp_dir: 需要调用方清理的临时目录（无临时产物时为 None）。
         truncated_pages: 因页数上限被跳过的页数（>0 时记 WARNING）。
     """
 
     kind: str
     paths: list[str] = field(default_factory=list)
+    page_numbers: list[int] = field(default_factory=list)
     temp_dir: str | None = None
     truncated_pages: int = 0
 
@@ -60,7 +62,10 @@ def detect_input_kind(file_path: str) -> str | None:
 
 
 def prepare_input(
-    file_path: str, capability: OCRCapability, provider_name: str = ""
+    file_path: str,
+    capability: OCRCapability,
+    provider_name: str = "",
+    page_numbers: list[int] | None = None,
 ) -> PreparedInput:
     """按 Provider 能力决定如何把文件交给它
 
@@ -68,6 +73,7 @@ def prepare_input(
         file_path: 原始文件路径。
         capability: 目标 Provider 的能力声明。
         provider_name: Provider 标识（仅用于错误信息）。
+        page_numbers: 仅处理 PDF 的指定页码（从 1 开始）；None 表示全部页面。
 
     Returns:
         PreparedInput: 整文件或按页图片。
@@ -86,15 +92,18 @@ def prepare_input(
 
     # 仅图片的 Provider 遇到 PDF → 按页渲染整页图片
     if input_kind == INPUT_PDF:
-        return _render_pdf_pages(file_path)
+        return _render_pdf_pages(file_path, page_numbers)
 
     raise OCRUnsupportedInputError(provider_name, input_kind, capability.accepts)
 
 
-def _render_pdf_pages(file_path: str) -> PreparedInput:
-    """把 PDF 每页渲染为 PNG，返回按页序排列的图片路径"""
+def _render_pdf_pages(
+    file_path: str, page_numbers: list[int] | None = None
+) -> PreparedInput:
+    """把 PDF 指定页渲染为 PNG，返回按页序排列的图片路径与原始页码"""
     tmp_dir = tempfile.mkdtemp(prefix="ocr_pages_")
     paths: list[str] = []
+    rendered_page_numbers: list[int] = []
     truncated = 0
 
     try:
@@ -105,26 +114,47 @@ def _render_pdf_pages(file_path: str) -> PreparedInput:
 
     try:
         total = doc.page_count
-        if total > _MAX_RENDER_PAGES:
-            truncated = total - _MAX_RENDER_PAGES
-            logger.warning(
-                "PDF 共 %d 页，超过 OCR 渲染上限 %d 页，超出部分将被跳过",
-                total, _MAX_RENDER_PAGES,
-            )
+        if page_numbers is None:
+            selected_pages = list(range(1, total + 1))
+        else:
+            selected_pages = sorted({
+                page_num
+                for page_num in page_numbers
+                if 1 <= page_num <= total
+            })
 
-        for page_idx in range(min(total, _MAX_RENDER_PAGES)):
-            page = doc.load_page(page_idx)
+        if len(selected_pages) > _MAX_RENDER_PAGES:
+            truncated = len(selected_pages) - _MAX_RENDER_PAGES
+            logger.warning(
+                "PDF 请求渲染 %d 页，超过 OCR 渲染上限 %d 页，超出部分将被跳过",
+                len(selected_pages), _MAX_RENDER_PAGES,
+            )
+            selected_pages = selected_pages[:_MAX_RENDER_PAGES]
+
+        for page_num in selected_pages:
+            page = doc.load_page(page_num - 1)
             pix = page.get_pixmap(dpi=_RENDER_DPI)
-            img_path = os.path.join(tmp_dir, f"page{page_idx + 1:04d}.png")
+            img_path = os.path.join(tmp_dir, f"page{page_num:04d}.png")
             pix.save(img_path)
             paths.append(img_path)
+            rendered_page_numbers.append(page_num)
     except Exception:
         shutil.rmtree(tmp_dir, ignore_errors=True)
         raise
     finally:
         doc.close()
 
-    logger.info("PDF 按页渲染完成: %d 页 -> %s (dpi=%d)", len(paths), tmp_dir, _RENDER_DPI)
+    logger.info(
+        "PDF 按页渲染完成: %d 页 -> %s (dpi=%d, pages=%s)",
+        len(paths),
+        tmp_dir,
+        _RENDER_DPI,
+        rendered_page_numbers,
+    )
     return PreparedInput(
-        kind="pages", paths=paths, temp_dir=tmp_dir, truncated_pages=truncated
+        kind="pages",
+        paths=paths,
+        page_numbers=rendered_page_numbers,
+        temp_dir=tmp_dir,
+        truncated_pages=truncated,
     )
