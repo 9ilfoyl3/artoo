@@ -21,7 +21,7 @@ function renderPreview() {
       <DocumentSummaryPreview
         docId="doc-1"
         filename="manual.pdf"
-        documentStatus="completed"
+        uploadedAt="2026-10-16T03:39:00Z"
       />
     </QueryClientProvider>
   )
@@ -32,7 +32,7 @@ beforeEach(() => {
 })
 
 describe('DocumentSummaryPreview', () => {
-  it('renders the structured title and summary artifact', async () => {
+  it('renders filename, upload time and the summary artifact', async () => {
     mockedSummary.mockResolvedValue({
       doc_id: 'doc-1',
       status: 'completed',
@@ -49,10 +49,10 @@ describe('DocumentSummaryPreview', () => {
     renderPreview()
 
     expect(screen.getByText('manual.pdf')).toBeInTheDocument()
+    expect(screen.getByText(/上传时间/)).toBeInTheDocument()
     await waitFor(() =>
-      expect(screen.getByText(/安装、配置与故障排查/)).toBeInTheDocument()
+      expect(screen.getByText('操作手册摘要。')).toBeInTheDocument()
     )
-    expect(screen.getByText('操作手册')).toBeInTheDocument()
   })
 
   it('shows the explicit empty state when no artifact exists', async () => {
@@ -72,7 +72,7 @@ describe('DocumentSummaryPreview', () => {
     renderPreview()
 
     await waitFor(() =>
-      expect(screen.getByText('该文件暂未生成摘要内容')).toBeInTheDocument()
+      expect(screen.getByText('该内容暂未生成摘要')).toBeInTheDocument()
     )
   })
 })

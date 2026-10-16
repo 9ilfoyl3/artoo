@@ -45,6 +45,7 @@ export interface MergedFile {
   progress: number
   progress_message: string | null
   isLocal: boolean
+  created_at?: string | null
 }
 
 interface FileItemProps {

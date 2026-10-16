@@ -116,12 +116,12 @@ function DocumentSummaryHover({
           align="start"
           sideOffset={8}
           collisionPadding={12}
-          className="w-auto overflow-hidden rounded-lg border bg-popover p-0 shadow-xl"
+          className="w-[300px] overflow-hidden rounded-xl border bg-popover p-0 shadow-xl"
         >
           <DocumentSummaryPreview
             docId={doc.id}
             filename={doc.filename}
-            documentStatus={doc.status}
+            uploadedAt={doc.created_at}
           />
         </TooltipContent>
       </Tooltip>
@@ -661,6 +661,7 @@ function Documents() {
       progress: doc.progress ?? 0,
       progress_message: doc.progress_message ?? null,
       isLocal: false,
+      created_at: doc.created_at,
     })),
     ...uploadingFiles
       .filter((f) => !confirmedLocalIds.has(f.id))
@@ -674,6 +675,7 @@ function Documents() {
         progress: 0,
         progress_message: null,
         isLocal: true,
+        created_at: null,
       })),
   ]
 
@@ -1321,9 +1323,13 @@ function Documents() {
       {/* 切片查看器 */}
       <ChunkViewer documentId={viewingChunks} onClose={() => setViewingChunks(null)} />
 
-      {/* 摘要预览：与悬浮卡片复用同一只读组件 */}
+      {/* 摘要预览：与悬浮卡片复用同一只读组件；内容无可聚焦元素，
+          阻止打开时自动聚焦到右上角关闭按钮 */}
       <Dialog open={!!summaryDoc} onOpenChange={(open) => { if (!open) setSummaryDoc(null) }}>
-        <DialogContent className="max-w-md overflow-hidden p-0">
+        <DialogContent
+          className="max-w-md overflow-hidden p-0"
+          onOpenAutoFocus={(e) => e.preventDefault()}
+        >
           <DialogHeader className="sr-only">
             <DialogTitle>摘要预览</DialogTitle>
             <DialogDescription>查看文档的异步摘要制品</DialogDescription>
@@ -1332,7 +1338,7 @@ function Documents() {
             <DocumentSummaryPreview
               docId={summaryDoc.id}
               filename={summaryDoc.filename}
-              documentStatus={summaryDoc.status}
+              uploadedAt={summaryDoc.created_at}
             />
           )}
         </DialogContent>
