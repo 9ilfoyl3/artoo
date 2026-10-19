@@ -501,6 +501,75 @@ curl $BASE/api/documents/<doc_id>/summary \
 - 代理 Key 调用时必须同时带 `X-External-User-Id`。
 - 摘要生成由 `pipeline:summaries` 独立 worker lane 异步完成；本接口只读 `document_summaries`，不负责重试或补生成。
 
+### 4.13 材料字数与 Token 估算（只读）
+
+`POST /api/materials/token-estimate`
+
+面向第三方在把知识库材料送入其他模型或计费系统前做长度预估。请求体必须且只能选择一种范围：
+
+- `knowledge_base_id`：估算该知识库下当前身份可见的全部文档；
+- `file_ids`：估算指定的一批知识库文档（最多 1000 个，按入参顺序去重返回）。
+
+两类字段互斥，不能同时传，也不能都不传。`file_ids` 仅接受知识库文档 ID（`Document.id`）；会话临时文件请使用 8.2.1 或 4.11 的会话文件接口。
+
+```bash
+curl -X POST $BASE/api/materials/token-estimate \
+  -H "Authorization: Bearer $KEY" \
+  -H "X-External-User-Id: $EU" \
+  -H "Content-Type: application/json" \
+  -d '{"knowledge_base_id":"kb-3f2a..."}'
+```
+
+```bash
+curl -X POST $BASE/api/materials/token-estimate \
+  -H "Authorization: Bearer $KEY" \
+  -H "X-External-User-Id: $EU" \
+  -H "Content-Type: application/json" \
+  -d '{"file_ids":["doc-71bc...","doc-82cd..."]}'
+```
+
+响应固定为 `result` 信封：
+
+```json
+{
+  "result": {
+    "scope": "knowledge_base",
+    "knowledge_base_id": "kb-3f2a...",
+    "document_count": 2,
+    "total_characters": 12040,
+    "total_tokens": 6731,
+    "encoding": "cl100k_base",
+    "fallback": false,
+    "files": [
+      {
+        "file_id": "doc-71bc...",
+        "knowledge_base_id": "kb-3f2a...",
+        "filename": "manual.pdf",
+        "file_type": "pdf",
+        "status": "completed",
+        "character_count": 8000,
+        "token_count": 4500
+      },
+      {
+        "file_id": "doc-82cd...",
+        "knowledge_base_id": "kb-3f2a...",
+        "filename": "notes.md",
+        "file_type": "md",
+        "status": "completed",
+        "character_count": 4040,
+        "token_count": 2231
+      }
+    ]
+  }
+}
+```
+
+- 估算口径：使用与 4.11 相同的**父块文本**（按 `chunk_index` 排序、以 `\n\n` 拼接），不重复计入子块；`character_count` 是解析后文本的 Python 字符数，`token_count` 使用 `tiktoken` 的 `cl100k_base` 编码。
+- `fallback=true` 表示当前进程未能加载 `tiktoken`，服务已降级为粗略字符估算；调用方仍可展示结果，但应把它视为近似值。
+- 未完成解析的文档会以 `status` 原样返回且长度为 0。只读身份不会看到不属于其文档列表可见范围的非 `completed` 文档。
+- 鉴权：允许 JWT、API Key、代理 Key 与 AK/SK 通道；请求中的每个知识库或文件都必须具备读权限，任一不存在 / 无权限统一 `404`（存在性非泄露）。
+- 代理 Key 调用时必须同时带 `X-External-User-Id`。
+
 ---
 
 ## 5. 文件夹
@@ -2496,3 +2565,12 @@ Agent 使用 `todo_write` 时会额外发送 `todo_update` SSE 事件：
 - 正常自然结束前，服务端会在模型遗漏最终 bookkeeping 时补发一个 `finalized=true` 的全完成快照。
 - 不消费该事件不影响对话正文、引用、工具结果或会话历史。
 - Artoo 平台前端在其输入框上方渲染 Codex 风格任务条：默认折叠显示完成进度和当前步骤，点击后展开完整任务列表。
+
+### 2026-10-19：材料字数与 Token 估算接口
+
+新增只读接口 `POST /api/materials/token-estimate`（见 4.13）：
+
+- 请求按 `knowledge_base_id` 或 `file_ids` 二选一，支持全库估算与指定文档估算；
+- 响应固定为 `{"result": ...}`，包含总字符数、总 token 数、编码、降级标记和逐文件明细；
+- token 使用 `tiktoken` `cl100k_base` 对父块解析文本估算，不重复计入子块；
+- 调用范围沿用现有 JWT / API Key / 代理 Key / AK/SK 鉴权与 KB 读权限边界。
