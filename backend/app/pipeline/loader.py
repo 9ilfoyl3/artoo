@@ -13,6 +13,7 @@ class EmbeddedImage:
     content_hash: str = ""       # 图片内容 hash（用于去重）
     description: str = ""        # 可选描述
     is_page_background: bool = False  # PDF 整页扫描底图；页面已有可信文本层时跳过其 OCR
+    is_page_snapshot: bool = False    # 整页渲染图；OCR 成功后替换该页文本而不是追加
 
 
 @dataclass

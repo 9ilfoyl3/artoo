@@ -66,6 +66,11 @@ def _has_low_quality_hybrid_text_layer(load_result: LoadResult) -> bool:
     )
 
 
+def _has_page_snapshots(load_result: LoadResult) -> bool:
+    """Return whether the loader supplied whole-page images for page-level OCR."""
+    return any(image.is_page_snapshot for image in load_result.images)
+
+
 def _pdf_pages_requiring_ocr(
     load_result: LoadResult, file_type: str
 ) -> list[int]:
@@ -369,10 +374,12 @@ class DocumentPipeline:
                 needs_ocr = True
                 stripped_content = load_result.content.strip()
             else:
+                has_page_snapshots = _has_page_snapshots(load_result)
                 low_quality_hybrid_text = _has_low_quality_hybrid_text_layer(load_result)
                 needs_ocr = (
                     not is_audio
                     and self.ocr_manager
+                    and not has_page_snapshots
                     and (
                         not stripped_content
                         or len(stripped_content) < 10
@@ -472,6 +479,7 @@ class DocumentPipeline:
                 (not cleaned_stripped or len(cleaned_stripped) < 10)
                 and self.ocr_manager
                 and not needs_ocr
+                and not _has_page_snapshots(load_result)
                 and not is_audio
             ):
                 ocr_result = await self.ocr_manager.recognize_document(file_path)
@@ -1291,10 +1299,12 @@ class DocumentPipeline:
     async def _process_embedded_images(
         self, load_result: LoadResult, doc_id: str
     ) -> str:
-        """处理嵌入图片：并发 OCR 识别，按页位置将图片文本插入到对应页面文本之后
+        """处理嵌入图片，并对整页快照执行替换式 OCR。
 
         对 PDF 中已由可信文本层覆盖的整页扫描底图跳过 OCR，避免同一页的隐藏文本层
-        与扫描图 OCR 结果被拼接成双份正文。普通嵌入图片仍按原有规则处理。
+        与扫描图 OCR 结果被拼接成双份正文。DOCX 的图片页使用整页快照，识别文本直接
+        替换该页文本层；同一文档存在整页快照时，不再追加任何局部图片 OCR 结果。
+        普通嵌入图片仍按原有规则处理。
 
         Args:
             load_result: 文档加载结果
@@ -1303,9 +1313,18 @@ class DocumentPipeline:
         Returns:
             合并了图片 OCR 文本的最终文档文本
         """
+        page_snapshots = [
+            image for image in load_result.images
+            if image.is_page_snapshot
+        ]
+        if page_snapshots:
+            return await self._process_page_snapshots(
+                load_result, page_snapshots, doc_id
+            )
+
         images = [
             image for image in load_result.images
-            if not image.is_page_background
+            if not image.is_page_background and not image.is_page_snapshot
         ]
         skipped_page_backgrounds = len(load_result.images) - len(images)
         if skipped_page_backgrounds:
@@ -1368,6 +1387,63 @@ class DocumentPipeline:
             len(final_content),
         )
 
+        return final_content
+
+    async def _process_page_snapshots(
+        self,
+        load_result: LoadResult,
+        snapshots: list[EmbeddedImage],
+        doc_id: str,
+    ) -> str:
+        """OCR whole-page snapshots and replace, never append to, page text layers."""
+        logger.info(
+            "文档 %s 开始按页 OCR %d 张 DOCX 整页快照",
+            doc_id,
+            len(snapshots),
+        )
+        ocr_results = await self._concurrent_ocr_images(snapshots, doc_id)
+        page_texts = list(load_result.page_texts)
+        recognized_pages: set[int] = set()
+
+        for image, ocr_text in zip(snapshots, ocr_results):
+            page_num = image.page_or_index
+            page_idx = page_num - 1
+            if not ocr_text or page_idx < 0 or page_idx >= len(page_texts):
+                continue
+            page_texts[page_idx] = ocr_text
+            recognized_pages.add(page_num)
+
+        if not recognized_pages:
+            logger.warning(
+                "文档 %s 的整页快照 OCR 均未返回文本，保留原文本层",
+                doc_id,
+            )
+            return load_result.content
+
+        load_result.page_texts = page_texts
+        if load_result.page_blocks:
+            load_result.page_blocks = [
+                [] if page_idx + 1 in recognized_pages else blocks
+                for page_idx, blocks in enumerate(load_result.page_blocks)
+            ]
+        if load_result.page_has_usable_text:
+            load_result.page_has_usable_text = [
+                True if page_idx + 1 in recognized_pages else usable
+                for page_idx, usable in enumerate(load_result.page_has_usable_text)
+            ]
+        load_result.metadata = {
+            **load_result.metadata,
+            "ocr_page_numbers": sorted(recognized_pages),
+            "page_ocr_count": len(recognized_pages),
+        }
+
+        final_content = "\n".join(page_texts)
+        logger.info(
+            "文档 %s 整页快照 OCR 完成，成功替换 %d/%d 页",
+            doc_id,
+            len(recognized_pages),
+            len(snapshots),
+        )
         return final_content
 
     async def _transcribe_with_limit(self, file_path: str):

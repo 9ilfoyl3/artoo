@@ -53,23 +53,29 @@ def _find_soffice() -> str | None:
     return shutil.which("soffice") or shutil.which("libreoffice")
 
 
-def _convert_doc_to_docx(doc_path: str, out_dir: str) -> str | None:
-    """用 LibreOffice 将 .doc 转换为 .docx。
+def _convert_office_file(
+    source_path: str,
+    out_dir: str,
+    target_format: str,
+) -> str | None:
+    """用 LibreOffice 将 Office 文件转换为目标格式。
 
     每次尝试使用独立的 UserInstallation profile 目录，避免并发时争抢
     同一 profile 锁导致静默失败。
 
     Args:
-        doc_path: 源 .doc 文件路径
+        source_path: 源 Office 文件路径
         out_dir: 输出目录
+        target_format: LibreOffice 输出格式（如 ``docx`` / ``pdf``）
 
     Returns:
-        转换后的 .docx 文件路径，失败返回 None
+        转换后的文件路径，失败返回 None
     """
     soffice = _find_soffice()
     if not soffice:
         return None
 
+    expected_suffix = f".{target_format.lstrip('.').lower()}"
     for attempt in range(1, _MAX_ATTEMPTS + 1):
         with tempfile.TemporaryDirectory(prefix="soffice_profile_") as profile_dir:
             user_installation = Path(profile_dir).as_uri()
@@ -78,10 +84,10 @@ def _convert_doc_to_docx(doc_path: str, out_dir: str) -> str | None:
                 "--headless",
                 f"-env:UserInstallation={user_installation}",
                 "--convert-to",
-                "docx",
+                target_format,
                 "--outdir",
                 out_dir,
-                doc_path,
+                source_path,
             ]
             try:
                 result = subprocess.run(
@@ -95,19 +101,24 @@ def _convert_doc_to_docx(doc_path: str, out_dir: str) -> str | None:
 
             if result.returncode == 0:
                 # LibreOffice 以源文件同名（改扩展名）输出
-                stem = Path(doc_path).stem
-                candidate = os.path.join(out_dir, f"{stem}.docx")
+                stem = Path(source_path).stem
+                candidate = os.path.join(out_dir, f"{stem}{expected_suffix}")
                 if os.path.isfile(candidate):
                     return candidate
-                # 兜底：扫描输出目录中的 docx
+                # 兜底：扫描输出目录中的目标格式文件
                 for name in os.listdir(out_dir):
-                    if name.endswith(".docx"):
+                    if name.lower().endswith(expected_suffix):
                         return os.path.join(out_dir, name)
 
             if attempt < _MAX_ATTEMPTS:
                 time.sleep(0.5 * attempt)
 
     return None
+
+
+def _convert_doc_to_docx(doc_path: str, out_dir: str) -> str | None:
+    """用 LibreOffice 将 .doc 转换为 .docx。"""
+    return _convert_office_file(doc_path, out_dir, "docx")
 
 
 class DocLoader(BaseLoader):
