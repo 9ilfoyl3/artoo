@@ -75,6 +75,29 @@ class _MalformedArgumentsLLM:
             yield StreamChunk(content="finished", finish_reason="stop")
 
 
+class _NonEmptyArgumentsLLM:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.messages_by_call: list[list[dict]] = []
+
+    async def stream_with_tools(self, messages, tools, **kwargs):
+        self.messages_by_call.append([dict(message) for message in messages])
+        self.calls += 1
+        if self.calls == 1:
+            yield StreamChunk(
+                tool_calls=[
+                    LLMToolCall(
+                        "call-1",
+                        "echo",
+                        '{"page": 2, "keyword": "合同"}',
+                    )
+                ],
+                finish_reason="tool_calls",
+            )
+        else:
+            yield StreamChunk(content="finished", finish_reason="stop")
+
+
 class _FakeRetriever:
     async def search_with_degraded(self, **kwargs):
         return [], False
@@ -210,6 +233,35 @@ def test_engine_replaces_malformed_tool_arguments_before_replay() -> None:
     assert "incomplete" in state.steps[0].tool_calls[0].result.error
     assert "incomplete" in llm.messages_by_call[1][-1]["content"]
     assert state.final_answer == "finished"
+
+
+def test_non_empty_tool_arguments_survive_events_sse_and_replay() -> None:
+    llm = _NonEmptyArgumentsLLM()
+    registry = ToolRegistry()
+    registry.register(_EchoTool())
+    events = []
+    bus = EventBus()
+
+    async def collect(event):
+        events.append(event)
+
+    bus.on(None, collect)
+    engine = AgentEngine(
+        AgentConfig(system_prompt="stable", max_iterations=3),
+        llm,
+        registry,
+        bus,
+    )
+
+    state = asyncio.run(engine.execute("session", "question"))
+
+    expected = {"page": 2, "keyword": "合同"}
+    tool_call = next(event for event in events if event.type == EventType.TOOL_CALL)
+    assert tool_call.data["arguments"] == expected
+    assert _agent_event_to_sse(tool_call)["arguments"] == expected
+    assert state.steps[0].tool_calls[0].args == expected
+    replayed = llm.messages_by_call[1][-2]["tool_calls"][0]["function"]["arguments"]
+    assert json.loads(replayed) == expected
 
 
 def test_history_replaces_malformed_tool_arguments_before_replay() -> None:
