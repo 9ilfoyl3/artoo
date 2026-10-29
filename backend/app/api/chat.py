@@ -26,6 +26,7 @@ from app.auth.kb_scope import authorize_requested_kbs
 from app.auth.session_ownership import verify_session_owner
 from app.agent.engine import AgentEngine
 from app.agent.events import AgentEvent, EventBus, EventType
+from app.agent.json_repair import canonicalize_tool_arguments_for_replay
 from app.agent.state import AgentState
 from app.agent.tools.base import ToolContext
 from app.agent.tools.calculator import CalculateTool
@@ -319,7 +320,7 @@ def _reconstruct_assistant_turn(content: str, agent_steps: list | None) -> list[
                         "name": c["name"],
                         "arguments": json.dumps(c["arguments"], ensure_ascii=False)
                         if not isinstance(c["arguments"], str)
-                        else c["arguments"],
+                        else canonicalize_tool_arguments_for_replay(c["arguments"]),
                     },
                 }
                 for c in calls

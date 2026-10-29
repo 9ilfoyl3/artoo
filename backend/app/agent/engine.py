@@ -20,7 +20,10 @@ from app.agent.config import AgentConfig
 from app.agent.content_classifier import ChannelFragment, PlainContentClassifier
 from app.agent.events import AgentEvent, EventBus, EventType
 from app.agent.harness import RepeatToolTracker
-from app.agent.json_repair import parse_tool_arguments
+from app.agent.json_repair import (
+    canonicalize_tool_arguments_for_replay,
+    parse_tool_arguments,
+)
 from app.agent.memory.compress import compress_context, prune_context
 from app.agent.memory.consolidator import MemoryConsolidator
 from app.agent.memory.token_estimator import TokenEstimator
@@ -476,7 +479,12 @@ class AgentEngine:
                         "type": "function",
                         "function": {
                             "name": call.function_name,
-                            "arguments": call.arguments,
+                            # vLLM parses replayed arguments with json.loads()
+                            # while rendering the next request. Never replay a
+                            # malformed/truncated provider fragment verbatim.
+                            "arguments": canonicalize_tool_arguments_for_replay(
+                                call.arguments
+                            ),
                         },
                     }
                     for call in response.tool_calls
