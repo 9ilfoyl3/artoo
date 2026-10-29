@@ -636,13 +636,14 @@ def _build_context(chunks: list[RetrievalResult], max_tokens: int | None = None)
 
 
 async def _build_references(chunks: list[RetrievalResult]) -> list[ReferenceItem]:
-    """将检索结果转换为引用来源列表，包含文件名"""
+    """将检索结果转换为引用来源列表，包含文件名与来源类型。"""
     if not chunks:
         return []
 
-    # 批量查询所有涉及的文档文件名
+    # 批量查询所有涉及的文档文件名，并按实际命中的表区分知识库文档与会话附件。
     doc_ids = list(set(chunk.doc_id for chunk in chunks))
     doc_filenames: dict[str, str] = {}
+    session_file_ids: set[str] = set()
     async with async_session() as session:
         from app.schema.db import Document
         result = await session.execute(
@@ -652,8 +653,8 @@ async def _build_references(chunks: list[RetrievalResult]) -> list[ReferenceItem
             doc_filenames[row.id] = row.filename
 
         # 会话临时文件的 doc_id 是 SessionFile.id（在 session_files 表，不在 documents 表），
-        # 上面查不到。对未匹配到的 doc_id 再查 SessionFile 补齐文件名，否则前端会回退显示
-        # doc_id 前 8 位（如 "101bed7c"）而非真实文件名。
+        # 上面查不到。对未匹配到的 doc_id 再查 SessionFile 补齐文件名并记录来源，否则前端
+        # 既只能回退显示 doc_id 前 8 位，也无法选择正确的原件预览接口。
         missing_ids = [d for d in doc_ids if d not in doc_filenames]
         if missing_ids:
             from app.schema.db import SessionFile
@@ -662,6 +663,7 @@ async def _build_references(chunks: list[RetrievalResult]) -> list[ReferenceItem
             )
             for row in sf_result:
                 doc_filenames[row.id] = row.filename
+                session_file_ids.add(row.id)
 
     refs = []
     for chunk in chunks:
@@ -684,6 +686,9 @@ async def _build_references(chunks: list[RetrievalResult]) -> list[ReferenceItem
                 doc_id=chunk.doc_id,
                 chunk_id=chunk.chunk_id,
                 filename=doc_filenames.get(chunk.doc_id, ""),
+                source_type=(
+                    "session" if chunk.doc_id in session_file_ids else "knowledge_base"
+                ),
                 content=parent,
                 child_content=child,
                 score=round(chunk.score, 4),

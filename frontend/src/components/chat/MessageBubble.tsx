@@ -117,6 +117,8 @@ export interface Reference {
   doc_id: string
   chunk_id: string
   filename: string
+  /** 命中来源：知识库文档或当前会话附件，决定原件预览接口。 */
+  source_type?: 'knowledge_base' | 'session'
   content: string
   child_content: string
   score: number
