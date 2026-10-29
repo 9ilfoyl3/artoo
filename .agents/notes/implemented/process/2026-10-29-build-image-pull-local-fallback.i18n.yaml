@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record: the Git blob hash of each side as of the
+# last confirmed-consistent state. Both languages carry equal authority; after
+# editing either side, bring the other along and re-record both hashes with:
+#   git hash-object .agents/notes/implemented/process/2026-10-29-build-image-pull-local-fallback.md .agents/notes/implemented/process/2026-10-29-build-image-pull-local-fallback.zh.md
+2026-10-29-build-image-pull-local-fallback.md: 3bda1583f4bf2b7eb32a128f12b93a628635bb24
+2026-10-29-build-image-pull-local-fallback.zh.md: e95d8c4b3f5dd7fa52efea4aa31278eacf57a449
