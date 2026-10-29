@@ -134,11 +134,11 @@ class FileTooLargeError(AppError):
 
 
 class EmptyDocumentContentError(AppError):
-    """文档无可提取内容，无法建立索引 -> 422。
+    """文档缺少建立索引所需的处理结果 -> 422。
 
-    出现场景：上传的文件（如扫描件 / 纯图片）经解析与 OCR 后仍无可用文本，或切分后
-    得到零 child chunk。此为用户输入问题而非服务端故障，应优雅提示而非 500。文案对用户
-    友好，提示更换文件或确认文件含可识别文本。
+    显式空文档会以 ``completed`` + ``chunk_count=0`` 正常完成，不再使用本异常。
+    当前场景仅限无法执行必要处理（如音频需要 ASR 但未配置）以及非空文档意外切出零
+    child chunk。此为用户输入或配置问题而非服务端故障，应优雅提示而非 500。
     """
 
     code = ErrorCodeEnum.EMPTY_DOCUMENT_CONTENT

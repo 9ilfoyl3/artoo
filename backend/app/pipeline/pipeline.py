@@ -167,7 +167,8 @@ class ProcessedDocument:
         enriched_children: 经 Enrich（当前 pass-through）后的子块文本，与 embedding 一一对应。
         metadata_list: 与 ``enriched_children`` 一一对应的 chunk 元数据。
         embed_result: 子块的稠密 / 稀疏向量。
-        doc_metadata: 文档级元数据（含 ``ocr_provider`` 等）。
+        doc_metadata: 文档级元数据（含 ``ocr_provider`` 等）；显式空文档带
+            ``empty_content=True``，供会话入库区分合法空内容与切分异常。
         child_to_parent: 子→父反向索引（O(1) 查找，Index 阶段构造 parent_id 用）。
     """
 
@@ -262,7 +263,7 @@ class DocumentPipeline:
 
         Raises:
             UploadCapExceeded: 该 scope 已用 chunk 与本次精确 child chunk 数之和超过生效上限。
-            ValueError: 文档提取文本为空且未配置 OCR 服务。
+            EmptyDocumentContentError: 音频文件需要 ASR，但当前没有可用 ASR 服务。
         """
         if source_kind not in ("kb", "session"):
             raise ValueError(f"非法的 source_kind: {source_kind!r}（仅支持 'kb' / 'session'）")
@@ -286,18 +287,20 @@ class DocumentPipeline:
 
                 asr_result = await self._transcribe_with_limit(file_path)
                 if not asr_result.full_text.strip():
-                    from app.api.errors import EmptyDocumentContentError
-
-                    raise EmptyDocumentContentError("音频转写结果为空")
-
-                load_result = LoadResult(
-                    content=asr_result.full_text,
-                    metadata={
-                        **load_result.metadata,
-                        "asr_provider": asr_result.provider_name,
-                    },
-                    images=[],
-                )
+                    logger.info(
+                        "[%s=%s] 音频转写结果为空，按空文档完成处理",
+                        source_kind,
+                        source_id,
+                    )
+                else:
+                    load_result = LoadResult(
+                        content=asr_result.full_text,
+                        metadata={
+                            **load_result.metadata,
+                            "asr_provider": asr_result.provider_name,
+                        },
+                        images=[],
+                    )
 
             # ─── 2. OCR（与 process() 等价，但不更新 ProgressTracker / 不查 Document） ───
             stripped_content = load_result.content.strip()
@@ -414,20 +417,18 @@ class DocumentPipeline:
                             source_id,
                         )
                     else:
-                        from app.api.errors import EmptyDocumentContentError
-
-                        raise EmptyDocumentContentError(
-                            "文档提取文本为空，且 OCR 未识别出内容"
+                        logger.info(
+                            "[%s=%s] 文档提取文本为空且 OCR 未识别出内容，"
+                            "按空文档完成处理",
+                            source_kind,
+                            source_id,
                         )
                 elif not is_audio and (not stripped_content or len(stripped_content) < 10):
                     if not self.ocr_manager:
-                        # 无可提取文本且未配置 OCR：业务输入问题而非服务端故障。
-                        # 会话同步路径透出后由全局 handler 映射 422；KB 异步路径被
-                        # except Exception 捕获并置文档 failed（两路径行为均符合预期）。
-                        from app.api.errors import EmptyDocumentContentError
-
-                        raise EmptyDocumentContentError(
-                            "文档提取文本为空，且未配置 OCR 服务"
+                        logger.info(
+                            "[%s=%s] 未配置 OCR，保留当前提取结果（可能为空）",
+                            source_kind,
+                            source_id,
                         )
 
             final_content = load_result.content
@@ -502,7 +503,7 @@ class DocumentPipeline:
                     )
 
             # ─── 2.6 剥离内嵌 base64 图片 ───
-            # 放在所有 OCR 分支（主路径 / 嵌入图片 / 兜底）收敛之后、空内容校验之前，
+            # 放在所有 OCR 分支（主路径 / 嵌入图片 / 兜底）收敛之后、空内容分支之前，
             # 一处覆盖全部来源。与 cleaner 不同，此步**无条件执行**：base64 是数据卫生
             # 问题而非去噪偏好，enable_cleaner=False 的知识库同样不该把它带进向量库。
             if final_content:
@@ -515,15 +516,30 @@ class DocumentPipeline:
                         source_kind, source_id, _stripped, _before_len,
                     )
 
-            # OCR / 转写 / 清洗全部走完仍无内容 → 明确失败，而不是入库一个 0 chunk 的空文档。
-            # 常见成因：OCR 服务不支持该文件类型（如只收图片的服务收到 PDF），
-            # 或扫描件质量过差。此处给出可操作的提示，避免"处理成功但检索不到"。
+            # OCR / 转写 / 清洗全部走完仍无内容：空文档是合法输入，不应进入失败重试
+            # 或写入占位 chunk。直接返回零 chunk 产物，让上层以 completed + chunk_count=0
+            # 表示“处理成功但无可检索内容”。
             if not final_content.strip() and not load_result.pre_chunked:
-                from app.api.errors import EmptyDocumentContentError
+                from app.pipeline.chunker import ChunkResult
+                from app.pipeline.embedder import EmbedResult
 
-                raise EmptyDocumentContentError(
-                    "文档未提取到任何文本："
-                    "若为扫描件请确认 OCR 服务可用且支持该文件类型"
+                logger.info(
+                    "[%s=%s] 文档无文本内容，按空文档完成处理",
+                    source_kind,
+                    source_id,
+                )
+                return ProcessedDocument(
+                    chunk_result=ChunkResult(
+                        parent_chunks=[],
+                        child_chunks=[],
+                        parent_child_map={},
+                        context_headers=[],
+                    ),
+                    enriched_children=[],
+                    metadata_list=[],
+                    embed_result=EmbedResult(dense_vectors=[], sparse_vectors=[]),
+                    doc_metadata={**load_result.metadata, "empty_content": True},
+                    child_to_parent={},
                 )
 
             # ─── 3. Chunk ───
@@ -953,12 +969,15 @@ class DocumentPipeline:
 
                 # 文档入库完成后非阻塞触发知识图谱抽取（双开关 + 队列门控，任何故障不影响
                 # 主入库结果；fire-and-forget 不阻塞 process 返回）。Req 1.1 / 1.2 / 4.1。
-                self._fire_graph_extract(doc_id=doc_id, kb_id=kb_id, tenant_id=kb_tenant_id)
-                self._fire_document_summary(
-                    doc_id=doc_id,
-                    kb_id=kb_id,
-                    tenant_id=kb_tenant_id,
-                )
+                if child_count:
+                    self._fire_graph_extract(
+                        doc_id=doc_id, kb_id=kb_id, tenant_id=kb_tenant_id
+                    )
+                    self._fire_document_summary(
+                        doc_id=doc_id,
+                        kb_id=kb_id,
+                        tenant_id=kb_tenant_id,
+                    )
 
                 total_duration_ms = int((time.monotonic() - pipeline_start) * 1000)
                 pl.summary(total_duration_ms)
