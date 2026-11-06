@@ -494,14 +494,11 @@ def test_agent_serializes_mutation_between_read_only_groups() -> None:
     assert by_name["read_b"][0] >= by_name["write_a"][1]
 
 
-def test_agent_stream_stall_watchdog_terminates_silent_generation(monkeypatch) -> None:
-    import app.agent.engine as engine_module
-
-    monkeypatch.setattr(engine_module, "_MAX_TRANSIENT_RETRIES", 0)
+def test_agent_trusts_provider_owned_stream_idle_watchdog() -> None:
     engine = AgentEngine(
         AgentConfig(
             system_prompt="stable",
-            llm_stall_timeout=1,
+            llm_stall_timeout=0.01,
             compaction_checkpoint_enabled=False,
         ),
         _StallLLM(),
@@ -509,13 +506,10 @@ def test_agent_stream_stall_watchdog_terminates_silent_generation(monkeypatch) -
         EventBus(),
     )
 
-    # Avoid waiting a full second in the unit suite while still exercising the
-    # watchdog path.
-    engine._config.llm_stall_timeout = 0.01  # type: ignore[misc]
     state = asyncio.run(engine.execute("session", "question"))
 
     assert state.is_complete is True
-    assert "遇到错误" in state.final_answer
+    assert state.final_answer == "late"
 
 
 def test_list_documents_filters_and_marks_summary_status(tmp_path, monkeypatch) -> None:

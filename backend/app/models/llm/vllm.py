@@ -10,6 +10,10 @@ from typing import AsyncIterator
 import httpx
 
 from app.models.llm.provider_detect import LLMProviderName, detect_provider
+from app.models.llm.stream_idle import (
+    DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS,
+    iter_with_stream_idle_timeout,
+)
 from app.models.llm.thinking_dialect import apply_thinking
 from app.models.provider import (
     ChatResponse,
@@ -107,13 +111,16 @@ class VllmLLM(LLMProvider):
         Returns:
             模型生成的完整文本
         """
+        request_timeout = kwargs.pop(
+            "_request_timeout", DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS
+        )
         payload = self._build_payload(messages, stream=False, **kwargs)
         try:
             url = f"{self.base_url}/chat/completions"
             print(f"[vLLM] 请求 URL: {url}")
             print(f"[vLLM] 请求 payload keys: {list(payload.keys())}, chat_template_kwargs={payload.get('chat_template_kwargs', 'not set')}")
             print(f"[vLLM] Client Headers: {dict(self._client.headers)}")
-            resp = await self._client.post(url, json=payload)
+            resp = await self._client.post(url, json=payload, timeout=request_timeout)
             print(f"[vLLM] 实际请求 Headers: {dict(resp.request.headers)}")
             print(f"[vLLM] 响应状态码: {resp.status_code}")
             print(f"[vLLM] 响应 Headers: {resp.headers}")
@@ -139,23 +146,35 @@ class VllmLLM(LLMProvider):
         Yields:
             模型生成的文本片段
         """
+        stream_idle_timeout = float(kwargs.pop(
+            "stream_idle_timeout", DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS
+        ))
         payload = self._build_payload(messages, stream=True, **kwargs)
         try:
             url = f"{self.base_url}/chat/completions"
             print(f"[vLLM] 流式请求 URL: {url}")
-            async with self._client.stream("POST", url, json=payload) as resp:
+            async with self._client.stream(
+                "POST", url, json=payload, timeout=stream_idle_timeout
+            ) as resp:
                 if resp.status_code != 200:
                     # 流式不支持，降级为非流式
                     print(f"[vLLM] 流式请求返回 {resp.status_code}，降级为非流式")
                     await resp.aclose()
-                    result = await self.generate(messages, **kwargs)
+                    result = await self.generate(
+                        messages, _request_timeout=stream_idle_timeout, **kwargs
+                    )
                     # 分段输出模拟流式
                     chunk_size = 4
                     for i in range(0, len(result), chunk_size):
                         yield result[i:i + chunk_size]
                     return
                 # 正常流式处理：vLLM 流式返回 SSE 格式 data: {...}\n\n
-                async for line in resp.aiter_lines():
+                lines = resp.aiter_lines().__aiter__()
+                async for line in iter_with_stream_idle_timeout(
+                    lines,
+                    stream_idle_timeout,
+                    stage="content",
+                ):
                     line = line.strip()
                     if not line:
                         continue
@@ -174,7 +193,9 @@ class VllmLLM(LLMProvider):
         except httpx.HTTPStatusError as e:
             # raise_for_status 触发的异常，同样降级
             print(f"[vLLM] 流式 HTTPStatusError {e.response.status_code}，降级为非流式")
-            result = await self.generate(messages, **kwargs)
+            result = await self.generate(
+                messages, _request_timeout=stream_idle_timeout, **kwargs
+            )
             chunk_size = 4
             for i in range(0, len(result), chunk_size):
                 yield result[i:i + chunk_size]
@@ -197,6 +218,9 @@ class VllmLLM(LLMProvider):
         Returns:
             ChatResponse 包含 content、tool_calls、finish_reason、usage
         """
+        request_timeout = kwargs.pop(
+            "_request_timeout", DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS
+        )
         payload = self._build_payload(messages, stream=False, tools=tools, **kwargs)
         # 如果 tools 为空列表，不发送 tools 参数（某些 API 不接受空 tools）
         if not tools:
@@ -205,7 +229,7 @@ class VllmLLM(LLMProvider):
             url = f"{self.base_url}/chat/completions"
             print(f"[vLLM] chat_with_tools: {len(tools)} tools, url={url}")
             print(f"[vLLM] chat_with_tools payload keys: {list(payload.keys())}")
-            resp = await self._client.post(url, json=payload)
+            resp = await self._client.post(url, json=payload, timeout=request_timeout)
             if resp.status_code != 200:
                 print(
                     f"[vLLM] chat_with_tools 失败 状态码: {resp.status_code}, "
@@ -274,6 +298,9 @@ class VllmLLM(LLMProvider):
         是 reasoning。tool-call arguments 由 provider 组装成完整调用；是否属于
         thinking 还是用户正文由 Agent loop 根据 finish reason 和 tool calls 判定。
         """
+        stream_idle_timeout = float(kwargs.pop(
+            "stream_idle_timeout", DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS
+        ))
         payload = self._build_payload(messages, stream=True, tools=tools, **kwargs)
         if "stream_options" not in payload:
             payload["stream_options"] = {"include_usage": True}
@@ -282,14 +309,22 @@ class VllmLLM(LLMProvider):
         tool_call_map: dict[int, dict] = {}
         actual_finish_reason = ""
         finish_emitted = False
+        stage = "waiting_first_event"
 
         try:
             url = f"{self.base_url}/chat/completions"
-            async with self._client.stream("POST", url, json=payload) as resp:
+            async with self._client.stream(
+                "POST", url, json=payload, timeout=stream_idle_timeout
+            ) as resp:
                 if resp.status_code != 200:
                     # 流式不支持，降级为非流式
                     await resp.aclose()
-                    result = await self.chat_with_tools(messages, tools, **kwargs)
+                    result = await self.chat_with_tools(
+                        messages,
+                        tools,
+                        _request_timeout=stream_idle_timeout,
+                        **kwargs,
+                    )
                     # 将非流式结果转为单个 StreamChunk 输出
                     if result.reasoning_content:
                         yield StreamChunk(
@@ -305,7 +340,12 @@ class VllmLLM(LLMProvider):
                     )
                     return
 
-                async for line in resp.aiter_lines():
+                lines = resp.aiter_lines().__aiter__()
+                async for line in iter_with_stream_idle_timeout(
+                    lines,
+                    stream_idle_timeout,
+                    stage=lambda: stage,
+                ):
                     line = line.strip()
                     if not line:
                         continue
@@ -360,6 +400,7 @@ class VllmLLM(LLMProvider):
                     # 处理 tool_calls delta（累积模式）
                     delta_tool_calls = delta.get("tool_calls")
                     if delta_tool_calls:
+                        stage = "tool_call_generation"
                         for tc_delta in delta_tool_calls:
                             idx = tc_delta.get("index", 0)
                             if idx not in tool_call_map:
@@ -388,6 +429,7 @@ class VllmLLM(LLMProvider):
                     # 处理普通 content delta
                     content = delta.get("content") or ""
                     if content:
+                        stage = "content"
                         yield StreamChunk(
                             content=content,
                             tool_calls=None,
@@ -401,6 +443,7 @@ class VllmLLM(LLMProvider):
                     # 两者择一即可，做双字段兼容，避免换 vLLM 版本/模型时思考通道丢数据。
                     reasoning = delta.get("reasoning_content") or delta.get("reasoning") or ""
                     if reasoning:
+                        stage = "reasoning"
                         yield StreamChunk(
                             reasoning=reasoning,
                             tool_calls=None,
@@ -410,6 +453,7 @@ class VllmLLM(LLMProvider):
 
                     raw_usage = chunk.get("usage")
                     if raw_usage:
+                        stage = "usage"
                         yield StreamChunk(
                             usage=TokenUsage(
                                 prompt_tokens=raw_usage.get("prompt_tokens", 0),
@@ -421,6 +465,7 @@ class VllmLLM(LLMProvider):
 
                     # 处理 finish_reason（流结束信号）
                     if finish_reason:
+                        stage = "finishing"
                         final_tool_calls = self._build_tool_calls(tool_call_map)
                         yield StreamChunk(
                             content="",
