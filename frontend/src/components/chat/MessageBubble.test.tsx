@@ -85,3 +85,49 @@ describe('MessageBubble tool-call arguments', () => {
     expect(screen.getByText('{}')).toBeInTheDocument()
   })
 })
+
+describe('MessageBubble LLM retry state', () => {
+  it('renders provider retry and terminal error notices in stream order', () => {
+    const message: Message = {
+      role: 'assistant',
+      content: '⚠️ 模型响应超时，已停止等待。请重试。',
+      isError: true,
+      segments: [
+        {
+          type: 'retry',
+          content: '模型响应中断，正在重试（第 2/3 次）',
+          retry: {
+            attempt: 1,
+            nextAttempt: 2,
+            maxAttempts: 3,
+            delayMs: 1100,
+          },
+          code: 'LLM_TIMEOUT',
+          stage: 'tool_call_generation',
+        },
+        {
+          type: 'error',
+          content: '⚠️ 模型响应超时，已停止等待。请重试。',
+          code: 'LLM_STREAM_IDLE_TIMEOUT',
+          stage: 'tool_call_generation',
+        },
+      ],
+    }
+
+    render(
+      <MessageBubble
+        message={message}
+        index={0}
+        isStreaming={false}
+        isLast
+        expandedRefs={new Set()}
+        onToggleRef={vi.fn()}
+      />
+    )
+
+    expect(screen.getByText(/正在重试（第 2\/3 次）/)).toBeInTheDocument()
+    expect(screen.getByText(/LLM_TIMEOUT · tool_call_generation/)).toBeInTheDocument()
+    expect(screen.getByText(/模型响应超时，已停止等待/)).toBeInTheDocument()
+    expect(screen.getByText(/LLM_STREAM_IDLE_TIMEOUT · tool_call_generation/)).toBeInTheDocument()
+  })
+})

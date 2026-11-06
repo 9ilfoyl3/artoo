@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record: the Git blob hash of each side as of the
+# last confirmed-consistent state. Both languages carry equal authority; after
+# editing either side, bring the other along and re-record both hashes with:
+#   git hash-object .agents/notes/implemented/feature/2026-11-06-safe-llm-retry-events.md .agents/notes/implemented/feature/2026-11-06-safe-llm-retry-events.zh.md
+2026-11-06-safe-llm-retry-events.md: 0007af7d575356f44af7b702395ebd7293302134
+2026-11-06-safe-llm-retry-events.zh.md: 9fca07bdc1757c4b3c9e25d915f9824bf5723f46

@@ -497,6 +497,27 @@ function Chat() {
                       ? structuredContent
                       : undefined
                   }
+                } else if (step.type === 'llm_retry') {
+                  segments.push({
+                    type: 'retry',
+                    content: String(step.message || '模型响应中断，正在重试'),
+                    retry: {
+                      attempt: Number(step.attempt || 1),
+                      nextAttempt: Number(step.next_attempt || 2),
+                      maxAttempts: Number(step.max_attempts || 3),
+                      delayMs: Number(step.delay_ms || 0),
+                    },
+                    code: typeof step.code === 'string' ? step.code : undefined,
+                    stage: typeof step.stage === 'string' ? step.stage : undefined,
+                  })
+                } else if (step.type === 'error') {
+                  base.isError = true
+                  segments.push({
+                    type: 'error',
+                    content: String(step.content || '执行出错'),
+                    code: typeof step.code === 'string' ? step.code : undefined,
+                    stage: typeof step.stage === 'string' ? step.stage : undefined,
+                  })
                 } else if (step.type === 'text_delta' || step.type === 'final_answer') {
                   if (step.content) {
                     // 合并连续的 answer 段落
@@ -519,7 +540,7 @@ function Chat() {
                 }
               }
               // 如果没有从 steps 中还原出 answer 段落，但有 content，补一个
-              if (base.content && !segments.some((s) => s.type === 'text')) {
+              if (base.content && !segments.some((s) => s.type === 'text' || s.type === 'error')) {
                 segments.push({ type: 'text', content: base.content })
               }
               if (segments.length > 0) base.segments = segments
@@ -982,11 +1003,46 @@ function Chat() {
                     break
                   }
 
+                  // Provider 自动重试：保留事件供实时渲染与历史回放。
+                  case 'llm_retry': {
+                    segments = [...segments, {
+                      type: 'retry',
+                      content: parsed.message || '模型响应中断，正在重试',
+                      retry: {
+                        attempt: Number(parsed.attempt || 1),
+                        nextAttempt: Number(parsed.next_attempt || 2),
+                        maxAttempts: Number(parsed.max_attempts || 3),
+                        delayMs: Number(parsed.delay_ms || 0),
+                      },
+                      code: typeof parsed.code === 'string' ? parsed.code : undefined,
+                      stage: typeof parsed.stage === 'string' ? parsed.stage : undefined,
+                    }]
+                    updateStream((prev) => {
+                      const updated = [...prev]
+                      updated[updated.length - 1] = {
+                        role: 'assistant',
+                        content: fullContent,
+                        references,
+                        segments,
+                      }
+                      return updated
+                    })
+                    break
+                  }
+
                   // 错误事件
                   case 'error': {
                     isError = true
-                    fullContent = `⚠️ ${parsed.content || '执行出错'}`
-                    segments = [...segments, { type: 'text', content: fullContent }]
+                    const errorContent = `⚠️ ${parsed.content || '执行出错'}`
+                    fullContent = fullContent
+                      ? `${fullContent}\n\n${errorContent}`
+                      : errorContent
+                    segments = [...segments, {
+                      type: 'error',
+                      content: errorContent,
+                      code: typeof parsed.code === 'string' ? parsed.code : undefined,
+                      stage: typeof parsed.stage === 'string' ? parsed.stage : undefined,
+                    }]
                     updateStream((prev) => {
                       const updated = [...prev]
                       updated[updated.length - 1] = {

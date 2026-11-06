@@ -12,6 +12,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import random
 import time
 import uuid
 from dataclasses import dataclass, replace
@@ -32,6 +33,7 @@ from app.agent.state import AgentState, AgentStep, ToolCallRecord
 from app.agent.tools.base import ToolContext, ToolResult
 from app.agent.tools.registry import ToolRegistry
 from app.agent.tools.text_sanitize import strip_think_blocks
+from app.models.llm.failures import LlmCallFailed, LlmFailureInfo
 from app.models.provider import ChatResponse, LLMProvider, LLMToolCall, StreamChunk, TokenUsage
 
 logger = logging.getLogger(__name__)
@@ -49,13 +51,18 @@ _EMPTY_FINAL_ANSWER = "抱歉，模型没有返回可展示的回答。请重试
 _MAX_EMPTY_RETRIES = 2
 _MAX_TRANSIENT_RETRIES = 2
 _MAX_FEEDBACK_RETRIES = 2
-_TRANSIENT_HTTP_CODES = {429, 500, 502, 503, 504}
 _RETRYABLE_FEEDBACK_STATUSES = {"rejected", "needs_evidence", "retryable_error"}
 _STUCK_LOOP_THRESHOLD = 3
 _KB_TOOL_NAMES = {"search_knowledge"}
 _KB_REDACTION_MARKER = "[Previous retrieval omitted — perform a fresh search.]"
 _TURN_CONTRACT_OPEN = "<response_contract>"
 _TURN_CONTRACT_CLOSE = "</response_contract>"
+
+
+def _retry_delay_ms(attempt_index: int) -> int:
+    """Bounded exponential backoff with a small deterministic-range jitter."""
+    base_ms = min(2**attempt_index * 1_000, 8_000)
+    return base_ms + random.randint(0, min(250, base_ms // 5))
 
 
 def _message_cursor(message: dict) -> str:
@@ -420,18 +427,20 @@ class AgentEngine:
 
             try:
                 result = await self._call_model(messages, tools, session_id, iteration)
-            except RuntimeError as exc:
+            except Exception as exc:
                 logger.exception("[Agent][Round-%d] model call failed", iteration + 1)
-                if state.steps:
-                    await self._synthesize_answer(state, session_id, "error")
-                else:
-                    state.final_answer = f"抱歉，处理请求时遇到错误：{exc}"
-                    state.is_complete = True
-                    await self._event_bus.emit(AgentEvent(
-                        type=EventType.ERROR, session_id=session_id,
-                        data={"error": str(exc), "stage": "llm_call"},
-                    ))
-                    await self._emit_turn_end(session_id, "error")
+                failure = (
+                    exc.failure
+                    if isinstance(exc, LlmCallFailed)
+                    else LlmFailureInfo.from_exception(exc)
+                )
+                attempts = exc.attempts if isinstance(exc, LlmCallFailed) else 1
+                await self._settle_llm_failure(
+                    state,
+                    session_id,
+                    failure,
+                    attempts=attempts,
+                )
                 return
 
             response, step = result.response, result.step
@@ -579,8 +588,8 @@ class AgentEngine:
         session_id: str,
         iteration: int,
     ) -> _RoundResult:
-        last_error: Exception | None = None
         for attempt in range(_MAX_TRANSIENT_RETRIES + 1):
+            builder: _AssistantResponseBuilder | None = None
             try:
                 builder = _AssistantResponseBuilder(self._event_bus, session_id, iteration)
                 call_kwargs: dict = {
@@ -623,21 +632,77 @@ class AgentEngine:
                     len(response.content), len(response.display_reasoning), response.content_channel,
                 )
                 return _RoundResult(response, step)
-            except RuntimeError as exc:
-                last_error = exc
-                message = str(exc)
-                transient = (
-                    any(str(code) in message for code in _TRANSIENT_HTTP_CODES)
-                    or "timeout" in message.lower()
-                    or "timed out" in message.lower()
-                    or "stream stalled" in message.lower()
+            except Exception as exc:
+                failure = LlmFailureInfo.from_exception(exc)
+                attempt_number = attempt + 1
+                visible_output = bool(
+                    builder is not None
+                    and (
+                        builder.reasoning_streamed
+                        or builder.answer_streamed
+                        or builder.tool_calls
+                    )
                 )
-                if not transient:
-                    raise
-                if attempt < _MAX_TRANSIENT_RETRIES:
-                    await asyncio.sleep(2**attempt)
+                if (
+                    not failure.retryable
+                    or visible_output
+                    or attempt >= _MAX_TRANSIENT_RETRIES
+                ):
+                    raise LlmCallFailed(failure, attempts=attempt_number) from exc
 
-        raise RuntimeError(f"LLM call failed after retries: {last_error}")
+                delay_ms = (
+                    min(failure.retry_after_ms, 30_000)
+                    if failure.retry_after_ms is not None
+                    else _retry_delay_ms(attempt)
+                )
+                next_attempt = attempt_number + 1
+                max_attempts = _MAX_TRANSIENT_RETRIES + 1
+                await self._event_bus.emit(AgentEvent(
+                    type=EventType.LLM_RETRY,
+                    session_id=session_id,
+                    data={
+                        "message": (
+                            "模型响应中断，正在重试"
+                            f"（第 {next_attempt}/{max_attempts} 次）"
+                        ),
+                        "code": failure.code,
+                        "stage": failure.stage,
+                        "retryable": failure.retryable,
+                        "attempt": attempt_number,
+                        "next_attempt": next_attempt,
+                        "max_attempts": max_attempts,
+                        "delay_ms": delay_ms,
+                        "iteration": iteration,
+                    },
+                ))
+                await asyncio.sleep(delay_ms / 1_000)
+
+        raise AssertionError("unreachable retry loop exit")
+
+    async def _settle_llm_failure(
+        self,
+        state: AgentState,
+        session_id: str,
+        failure: LlmFailureInfo,
+        *,
+        attempts: int,
+    ) -> None:
+        """Expose a structured failure without synthesizing a fake answer."""
+        state.final_answer = failure.user_message
+        state.is_complete = True
+        state.degraded = True
+        await self._event_bus.emit(AgentEvent(
+            type=EventType.ERROR,
+            session_id=session_id,
+            data={
+                "error": failure.user_message,
+                "code": failure.code,
+                "stage": failure.stage,
+                "retryable": failure.retryable,
+                "attempts": attempts,
+            },
+        ))
+        await self._emit_turn_end(session_id, "error")
 
     async def _synthesize_answer(
         self,

@@ -906,6 +906,7 @@ def _agent_event_to_sse(event: AgentEvent) -> dict | None:
     {"type": "tool_call", "tool_name": "...", "tool_call_id": "...", "iteration": 0}
     {"type": "tool_progress", "tool_call_id": "...", "completed": 4, "total": 20}
     {"type": "tool_result", "tool_call_id": "...", "tool_name": "...", "success": true, "duration_ms": 350}
+    {"type": "llm_retry", "attempt": 1, "next_attempt": 2, "max_attempts": 3, "delay_ms": 1100}
     # MCP structuredContent 合法时额外带：
     {"type": "tool_result", ..., "structured_content": {"kind": "...", "data": {}}}
     {"type": "turn_end", "finish_reason": "stop"}
@@ -981,6 +982,19 @@ def _agent_event_to_sse(event: AgentEvent) -> dict | None:
             "count": event.data.get("count", 0),
             "finalized": bool(event.data.get("finalized", False)),
         }
+    elif event.type == EventType.LLM_RETRY:
+        return {
+            "type": "llm_retry",
+            "message": event.data.get("message", "模型响应中断，正在重试"),
+            "code": event.data.get("code", "LLM_REQUEST_FAILED"),
+            "stage": event.data.get("stage", "llm_call"),
+            "retryable": bool(event.data.get("retryable", True)),
+            "attempt": int(event.data.get("attempt", 1)),
+            "next_attempt": int(event.data.get("next_attempt", 2)),
+            "max_attempts": int(event.data.get("max_attempts", 3)),
+            "delay_ms": int(event.data.get("delay_ms", 0)),
+            "iteration": event.data.get("iteration", 0),
+        }
     elif event.type == EventType.TURN_END:
         return {
             "type": "turn_end",
@@ -996,10 +1010,14 @@ def _agent_event_to_sse(event: AgentEvent) -> dict | None:
             "current_context_tokens": event.data.get("current_context_tokens", 0),
         }
     elif event.type == EventType.ERROR:
-        return {
+        error_event = {
             "type": "error",
             "content": event.data.get("error", ""),
         }
+        for key in ("code", "stage", "retryable", "attempts"):
+            if key in event.data:
+                error_event[key] = event.data[key]
+        return error_event
     return None
 
 

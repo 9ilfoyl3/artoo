@@ -85,6 +85,7 @@ backend/tests/*
 !backend/tests/test_material_token_estimate_api.py
 !backend/tests/test_pipeline_empty_document.py
 !backend/tests/test_doc_loader.py
+!backend/tests/test_llm_retry_events.py
 
 # E2E 调试脚本
 backend/_e2e_*.py
