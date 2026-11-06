@@ -591,25 +591,12 @@ class AgentEngine:
                     call_kwargs["max_tokens"] = self._config.max_output_tokens
                 if self._config.reasoning_effort is not None:
                     call_kwargs["reasoning_effort"] = self._config.reasoning_effort
+                call_kwargs["stream_idle_timeout"] = float(
+                    self._config.llm_stall_timeout
+                )
 
                 stream = self._llm.stream_with_tools(messages, tools, **call_kwargs)
-                iterator = stream.__aiter__()
-                while True:
-                    try:
-                        chunk = await asyncio.wait_for(
-                            anext(iterator),
-                            timeout=max(0.001, float(self._config.llm_stall_timeout)),
-                        )
-                    except StopAsyncIteration:
-                        break
-                    except asyncio.TimeoutError as exc:
-                        close = getattr(iterator, "aclose", None)
-                        if close is not None:
-                            await close()
-                        raise RuntimeError(
-                            "LLM stream stalled: no output for "
-                            f"{self._config.llm_stall_timeout}s"
-                        ) from exc
+                async for chunk in stream:
                     await builder.add(chunk)
                 response = await builder.finalize()
                 step = AgentStep(
@@ -698,7 +685,10 @@ class AgentEngine:
             })
 
             builder = _AssistantResponseBuilder(self._event_bus, session_id, len(state.steps))
-            kwargs: dict = {"temperature": self._config.temperature}
+            kwargs: dict = {
+                "temperature": self._config.temperature,
+                "stream_idle_timeout": float(self._config.llm_stall_timeout),
+            }
             if self._config.max_output_tokens is not None:
                 kwargs["max_tokens"] = self._config.max_output_tokens
             async for chunk in self._llm.stream_with_tools(messages, [], **kwargs):

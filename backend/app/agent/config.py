@@ -68,12 +68,15 @@ class AgentConfig:
     # 被误标为自然完成。
     max_output_tokens: int | None = None
 
-    # LLM 单次调用超时时间（秒）
+    # LLM 单次调用超时时间（秒）。保留字段供旧配置兼容；实际 watchdog
+    # 由 provider 在原始传输层执行。
     llm_call_timeout: int = 120
 
-    # P1: stream stall watchdog. The timeout resets on every provider chunk,
-    # so long but healthy generations are not killed by a total-duration limit.
-    llm_stall_timeout: float = 45.0
+    # Provider-level stream idle watchdog. Every raw upstream line, including
+    # SSE comments and tool-call deltas, resets this deadline. The timer is
+    # owned by the provider because tool-call deltas are intentionally not
+    # exposed as Agent-facing StreamChunk values.
+    llm_stall_timeout: float = 300.0
 
     # P1: durably reuse compacted context across turns.
     compaction_checkpoint_enabled: bool = True

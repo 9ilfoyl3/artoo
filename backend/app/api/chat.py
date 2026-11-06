@@ -1290,7 +1290,8 @@ async def _build_agent_runtime(
             "compaction_checkpoint_enabled", True
         ),
         llm_stall_timeout=preset_cfg.get(
-            "llm_stall_timeout", AgentConfig.llm_stall_timeout
+            "llm_stream_idle_timeout",
+            preset_cfg.get("llm_stall_timeout", AgentConfig.llm_stall_timeout),
         ),
         reasoning_effort=(preset_cfg.get("reasoning_effort") or None),
     )

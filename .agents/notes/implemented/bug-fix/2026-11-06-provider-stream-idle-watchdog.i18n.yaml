@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record: the Git blob hash of each side as of the
+# last confirmed-consistent state. Both languages carry equal authority; after
+# editing either side, bring the other along and re-record both hashes with:
+#   git hash-object .agents/notes/implemented/bug-fix/2026-11-06-provider-stream-idle-watchdog.md .agents/notes/implemented/bug-fix/2026-11-06-provider-stream-idle-watchdog.zh.md
+2026-11-06-provider-stream-idle-watchdog.md: c40a7dc6cb958cd9185cc9e59f709a01e7ef9d20
+2026-11-06-provider-stream-idle-watchdog.zh.md: 3e99b14199b83c76a43501ba21883782b67933ca

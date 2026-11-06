@@ -10,6 +10,10 @@ from uuid import uuid4
 
 import httpx
 
+from app.models.llm.stream_idle import (
+    DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS,
+    iter_with_stream_idle_timeout,
+)
 from app.models.provider import (
     ChatResponse,
     LLMProvider,
@@ -97,12 +101,22 @@ class OllamaLLM(LLMProvider):
         Yields:
             模型生成的文本片段
         """
+        stream_idle_timeout = float(kwargs.pop(
+            "stream_idle_timeout", DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS
+        ))
         payload = self._build_payload(messages, stream=True, **kwargs)
         try:
-            async with self._client.stream("POST", "/api/chat", json=payload) as resp:
+            async with self._client.stream(
+                "POST", "/api/chat", json=payload, timeout=stream_idle_timeout
+            ) as resp:
                 resp.raise_for_status()
                 # Ollama 流式返回 NDJSON，每行一个 JSON 对象
-                async for line in resp.aiter_lines():
+                lines = resp.aiter_lines().__aiter__()
+                async for line in iter_with_stream_idle_timeout(
+                    lines,
+                    stream_idle_timeout,
+                    stage="content",
+                ):
                     if not line.strip():
                         continue
                     chunk = json.loads(line)
@@ -179,13 +193,24 @@ class OllamaLLM(LLMProvider):
         Yields:
             StreamChunk 包含 content 或 tool_calls
         """
+        stream_idle_timeout = float(kwargs.pop(
+            "stream_idle_timeout", DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS
+        ))
         payload = self._build_payload(messages, stream=True, tools=tools, **kwargs)
         if not tools:
             payload.pop("tools", None)
+        stage = "waiting_first_event"
         try:
-            async with self._client.stream("POST", "/api/chat", json=payload) as resp:
+            async with self._client.stream(
+                "POST", "/api/chat", json=payload, timeout=stream_idle_timeout
+            ) as resp:
                 resp.raise_for_status()
-                async for line in resp.aiter_lines():
+                lines = resp.aiter_lines().__aiter__()
+                async for line in iter_with_stream_idle_timeout(
+                    lines,
+                    stream_idle_timeout,
+                    stage=lambda: stage,
+                ):
                     if not line.strip():
                         continue
                     chunk = json.loads(line)
@@ -195,6 +220,7 @@ class OllamaLLM(LLMProvider):
                     # 处理 content（逐块流式返回）
                     content = message.get("content", "") or ""
                     if content:
+                        stage = "content"
                         yield StreamChunk(
                             content=content,
                             response_type="content",
@@ -203,6 +229,7 @@ class OllamaLLM(LLMProvider):
                     # Qwen/DeepSeek 推理模型可能把 thinking 放在独立通道。
                     thinking = message.get("thinking") or message.get("reasoning") or ""
                     if thinking:
+                        stage = "reasoning"
                         yield StreamChunk(
                             reasoning=thinking,
                             response_type="thinking",
@@ -211,6 +238,7 @@ class OllamaLLM(LLMProvider):
                     # 处理 tool_calls（Ollama 在最终 chunk 中一次性返回）
                     raw_tool_calls = message.get("tool_calls", []) or []
                     if raw_tool_calls:
+                        stage = "finishing"
                         tool_calls = self._parse_tool_calls(raw_tool_calls)
                         yield StreamChunk(
                             tool_calls=tool_calls,
@@ -220,6 +248,7 @@ class OllamaLLM(LLMProvider):
 
                     # 流结束标记
                     if is_done:
+                        stage = "finishing"
                         raw_usage = self._parse_usage(chunk)
                         if raw_usage:
                             yield StreamChunk(usage=raw_usage, response_type="usage")

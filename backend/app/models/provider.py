@@ -75,7 +75,12 @@ class LLMProvider(ABC):
 
     @abstractmethod
     async def stream(self, messages: list[dict], **kwargs) -> AsyncIterator[str]:
-        """流式生成回复，逐 token 返回"""
+        """流式生成回复，逐 token 返回。
+
+        Provider implementations may consume ``stream_idle_timeout`` from
+        ``kwargs`` and must enforce it at the upstream transport boundary,
+        because semantic output chunks are not a reliable liveness signal.
+        """
         ...
 
     async def chat_with_tools(
@@ -87,7 +92,12 @@ class LLMProvider(ABC):
     async def stream_with_tools(
         self, messages: list[dict], tools: list[dict], **kwargs
     ) -> AsyncIterator[StreamChunk]:
-        """Streaming Function Calling: 流式返回包含工具调用的响应片段"""
+        """Streaming Function Calling: 流式返回包含工具调用的响应片段。
+
+        ``stream_idle_timeout`` is an upstream transport budget, not a total
+        generation limit. Every raw provider event must reset it, including
+        comments and tool-call deltas that do not become ``StreamChunk`` values.
+        """
         raise NotImplementedError(
             "This provider does not support streaming function calling"
         )
