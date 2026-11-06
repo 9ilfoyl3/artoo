@@ -216,6 +216,13 @@ def test_document_catalog_lists_only_authorized_completed_documents(tmp_path, mo
             assert result.success is True
             assert result.data["total"] == 1
             assert [item["doc_id"] for item in result.data["documents"]] == ["doc-a1"]
+            assert result.data["files"] == [
+                {
+                    "id": "doc-a1",
+                    "filename": "a1.pdf",
+                    "source": "document",
+                }
+            ]
             assert result.data["has_more"] is False
             assert state.document_catalog["doc-a1"]["filename"] == "a1.pdf"
 

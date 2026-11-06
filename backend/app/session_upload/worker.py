@@ -48,7 +48,8 @@ logger = logging.getLogger("session_upload.worker")
 # 不可重试的错误类型：入参/内容类错误重试也不会成功，直接进 DLQ。
 # - FileNotFoundError：MinIO 原件丢失（object_key 无对象）。
 # - ValueError / PermissionError：参数/权限错误。
-# - EmptyDocumentContentError：空文档 / 零 chunk（内容问题，重试无意义）。
+# - EmptyDocumentContentError：缺少必要提取能力，或非显式空文档切出零 chunk
+#   （内容/配置问题，重试无意义）。
 # - UploadCapExceeded：容量闸门拒绝（配置未变前重试必再超限）。
 # 均通过延迟导入在 ``_non_retryable_errors`` 中解析，避免模块导入期硬依赖。
 

@@ -117,6 +117,8 @@ export interface Reference {
   doc_id: string
   chunk_id: string
   filename: string
+  /** 命中来源：知识库文档或当前会话附件，决定原件预览接口。 */
+  source_type?: 'knowledge_base' | 'session'
   content: string
   child_content: string
   score: number
@@ -512,6 +514,19 @@ function toolArgSummary(toolName?: string, args?: Record<string, unknown>): stri
   return null
 }
 
+// 工具调用参数只在展开态展示。即使模型传入空对象也明确显示 `{}`，
+// 避免把“可选参数未提供”误判为链路上参数丢失。
+export function ToolCallArguments({ args }: { args?: Record<string, unknown> }) {
+  return (
+    <div className="space-y-1">
+      <div className="text-[11px] font-medium text-muted-foreground">调用参数</div>
+      <pre className="overflow-x-auto whitespace-pre-wrap break-all rounded-md border border-border/40 bg-muted/30 px-2 py-1.5 font-mono text-[11px] leading-relaxed text-foreground/80">
+        {JSON.stringify(args ?? {}, null, 2)}
+      </pre>
+    </div>
+  )
+}
+
 // 检索类工具读到的文件：在步骤标题行内联展示（与阅读附件同形式，免展开即可见）。
 // 单行排列，放不下时右侧淡出并显示「共 N 个」总数提示；命中可预览类型的文件名可点击预览。
 function InlineToolFiles({
@@ -726,6 +741,7 @@ function StepRow({
           <div className="px-2.5 pb-2.5 pt-1 border-t border-border/30">
             {isTool ? (
               <div className="space-y-1.5">
+                <ToolCallArguments args={seg.toolArgs} />
                 <p className="text-xs text-muted-foreground">
                   {attachmentTarget ? (
                     <>
@@ -956,6 +972,7 @@ export function LegacyStepRow({
           <div className="px-2.5 pb-2.5 pt-1 border-t border-border/30">
             {isTool ? (
               <div className="space-y-1.5">
+                <ToolCallArguments args={seg.toolArgs} />
                 <p className="text-xs text-muted-foreground">
                   {attachmentTarget ? (
                     <>

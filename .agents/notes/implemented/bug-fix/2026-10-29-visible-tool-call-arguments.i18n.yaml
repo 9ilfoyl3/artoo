@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record: the Git blob hash of each side as of the
+# last confirmed-consistent state. Both languages carry equal authority; after
+# editing either side, bring the other along and re-record both hashes with:
+#   git hash-object .agents/notes/implemented/bug-fix/2026-10-29-visible-tool-call-arguments.md .agents/notes/implemented/bug-fix/2026-10-29-visible-tool-call-arguments.zh.md
+2026-10-29-visible-tool-call-arguments.md: 50437c88aef6d50f7410f72fdee21f6c34888c2a
+2026-10-29-visible-tool-call-arguments.zh.md: df95e2d3e208cd1fb32fc0961ce5d36db408300f

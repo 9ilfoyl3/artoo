@@ -52,7 +52,19 @@ pull_image() {
     fi
     echo "  镜像源拉取失败(${PULL_MIRROR}/${img}), 回退直连..."
   fi
-  docker pull $PLATFORM_ARG "$img"
+  if docker pull $PLATFORM_ARG "$img"; then
+    return 0
+  fi
+
+  # 上游 tag 下线或 registry 临时不可达时，允许复用本机已准备的同架构镜像。
+  # 调用方需自行确认该本地镜像来源可信；这里只校验架构，不跨架构兜底。
+  local local_arch
+  local_arch=$(docker image inspect "$img" --format '{{.Architecture}}' 2>/dev/null || true)
+  if [[ -n "$local_arch" && ( -z "$ARCH" || "$local_arch" == "$ARCH" ) ]]; then
+    echo "  远端拉取失败，复用本地同架构镜像: $img ($local_arch)"
+    return 0
+  fi
+  return 1
 }
 
 echo "[1/4] 构建应用镜像..."

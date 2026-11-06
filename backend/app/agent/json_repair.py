@@ -171,8 +171,33 @@ def parse_tool_arguments(raw: str) -> JSONRepairResult:
     return result
 
 
+def canonicalize_tool_arguments_for_replay(raw: str) -> str:
+    """Return a valid JSON-object string safe to replay in assistant history.
+
+    OpenAI-compatible servers such as vLLM parse historical
+    ``assistant.tool_calls[].function.arguments`` with ``json.loads`` during
+    chat-template rendering. A provider may emit malformed or truncated
+    arguments even though Artoo rejects the call locally. Replaying the raw
+    fragment then turns the next round into an HTTP 400.
+
+    Valid arguments are canonicalized so repaired trailing commas do not leak
+    into history. Invalid, truncated, or non-object arguments become ``{}``;
+    the adjacent tool observation still tells the model that the call was not
+    executed and must be retried.
+    """
+    result = parse_tool_arguments(raw or "{}")
+    if not result.ok or result.truncated or not isinstance(result.value, dict):
+        return "{}"
+    return json.dumps(
+        result.value,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
 __all__ = [
     "JSONRepairResult",
+    "canonicalize_tool_arguments_for_replay",
     "parse_json_with_repair",
     "parse_tool_arguments",
 ]

@@ -501,6 +501,75 @@ curl $BASE/api/documents/<doc_id>/summary \
 - 代理 Key 调用时必须同时带 `X-External-User-Id`。
 - 摘要生成由 `pipeline:summaries` 独立 worker lane 异步完成；本接口只读 `document_summaries`，不负责重试或补生成。
 
+### 4.13 材料字数与 Token 估算（只读）
+
+`POST /api/materials/token-estimate`
+
+面向第三方在把知识库材料送入其他模型或计费系统前做长度预估。请求体必须且只能选择一种范围：
+
+- `knowledge_base_id`：估算该知识库下当前身份可见的全部文档；
+- `file_ids`：估算指定的一批知识库文档（最多 1000 个，按入参顺序去重返回）。
+
+两类字段互斥，不能同时传，也不能都不传。`file_ids` 仅接受知识库文档 ID（`Document.id`）；会话临时文件请使用 8.2.1 或 4.11 的会话文件接口。
+
+```bash
+curl -X POST $BASE/api/materials/token-estimate \
+  -H "Authorization: Bearer $KEY" \
+  -H "X-External-User-Id: $EU" \
+  -H "Content-Type: application/json" \
+  -d '{"knowledge_base_id":"kb-3f2a..."}'
+```
+
+```bash
+curl -X POST $BASE/api/materials/token-estimate \
+  -H "Authorization: Bearer $KEY" \
+  -H "X-External-User-Id: $EU" \
+  -H "Content-Type: application/json" \
+  -d '{"file_ids":["doc-71bc...","doc-82cd..."]}'
+```
+
+响应固定为 `result` 信封：
+
+```json
+{
+  "result": {
+    "scope": "knowledge_base",
+    "knowledge_base_id": "kb-3f2a...",
+    "document_count": 2,
+    "total_characters": 12040,
+    "total_tokens": 6731,
+    "encoding": "cl100k_base",
+    "fallback": false,
+    "files": [
+      {
+        "file_id": "doc-71bc...",
+        "knowledge_base_id": "kb-3f2a...",
+        "filename": "manual.pdf",
+        "file_type": "pdf",
+        "status": "completed",
+        "character_count": 8000,
+        "token_count": 4500
+      },
+      {
+        "file_id": "doc-82cd...",
+        "knowledge_base_id": "kb-3f2a...",
+        "filename": "notes.md",
+        "file_type": "md",
+        "status": "completed",
+        "character_count": 4040,
+        "token_count": 2231
+      }
+    ]
+  }
+}
+```
+
+- 估算口径：使用与 4.11 相同的**父块文本**（按 `chunk_index` 排序、以 `\n\n` 拼接），不重复计入子块；`character_count` 是解析后文本的 Python 字符数，`token_count` 使用 `tiktoken` 的 `cl100k_base` 编码。
+- `fallback=true` 表示当前进程未能加载 `tiktoken`，服务已降级为粗略字符估算；调用方仍可展示结果，但应把它视为近似值。
+- 未完成解析的文档会以 `status` 原样返回且长度为 0。只读身份不会看到不属于其文档列表可见范围的非 `completed` 文档。
+- 鉴权：允许 JWT、API Key、代理 Key 与 AK/SK 通道；请求中的每个知识库或文件都必须具备读权限，任一不存在 / 无权限统一 `404`（存在性非泄露）。
+- 代理 Key 调用时必须同时带 `X-External-User-Id`。
+
 ---
 
 ## 5. 文件夹
@@ -682,6 +751,7 @@ curl -X POST $BASE/api/retrieval/agent \
   "answer": "根据检索到的资料，保修期为 12 个月……",
   "references": [
     { "doc_id":"doc-71bc...", "chunk_id":"ck-1", "filename":"manual.pdf",
+      "source_type":"knowledge_base",
       "content":"父块…", "child_content":"子块…", "score":0.83 }
   ],
   "agent_steps": [
@@ -701,6 +771,8 @@ curl -X POST $BASE/api/retrieval/agent \
 ```
 
 > `agent_steps` 用于在第三方界面还原 Agent 的检索/推理过程；只需召回来源时取 `references` 即可。各步骤对象的字段结构与流式 SSE 事件**完全一致**，见 6.3.1；还原为可视步骤面板的算法见 6.3.2。
+
+> 每个 `references` 项的 `source_type` 标识来源：`knowledge_base`（知识库文档）或 `session`（当前会话附件）。需要预览原件时，前者调用 `GET /api/documents/{doc_id}/raw`，后者调用 `GET /api/sessions/{session_id}/files/{doc_id}/raw`；`session_id` 使用发起该轮对话时的会话 ID。
 
 ### 6.2 对话问答（OpenAI 兼容）
 
@@ -746,10 +818,12 @@ curl -X POST $BASE/v1/chat/completions \
   "id": "chatcmpl-xxx", "object": "chat.completion",
   "choices": [{ "index":0, "message":{ "role":"assistant", "content":"根据[1]，保修期为12个月……" }, "finish_reason":"stop" }],
   "usage": { "prompt_tokens":12, "completion_tokens":80, "total_tokens":92 },
-  "references": [{ "doc_id":"doc-71bc...", "chunk_id":"ck-1", "filename":"manual.pdf", "content":"父块…", "child_content":"子块…", "score":0.83 }],
+  "references": [{ "doc_id":"doc-71bc...", "chunk_id":"ck-1", "filename":"manual.pdf", "source_type":"knowledge_base", "content":"父块…", "child_content":"子块…", "score":0.83 }],
   "metadata": { "retrieval_mode":"hybrid", "degraded":false }
 }
 ```
+
+> `references[].source_type` 的取值与预览接口选择规则同 6.1.1；历史消息中的旧引用可能缺省该字段，消费方应按 `knowledge_base` 兼容处理。
 
 > **非流式 + `agent` 模式的限制**：响应体只有 `choices` / `usage` / `references` / `metadata`，**不含 `agent_steps`**（步骤已落库，但不在本次响应里回传）。要拿本轮步骤有两条路：传了 `session_id` 时答完再调 `GET /api/sessions/{id}/messages` 取最后一条 assistant 的 `agent_steps`；或改用 `POST /api/retrieval/agent`（响应直接带 `agent_steps`，但无会话、不落库）。想在同一次请求里边跑边拿步骤，用 6.3 的流式。
 
@@ -758,7 +832,7 @@ curl -X POST $BASE/v1/chat/completions \
 设 `"stream": true`，返回 `text/event-stream`，逐条 `data:` 为一段 JSON。共有三类帧，**按「有没有 `type` 字段」区分**，第三方解析时须按下列顺序判别：
 
 1. **OpenAI 兼容增量帧**（非 agent 模式，即 `direct` / `hybrid`）：`{"id":...,"object":"chat.completion.chunk","choices":[{"delta":{"content":"片段"}}]}`，结束帧 `choices[0].finish_reason == "stop"`。此类帧无 `type`。
-2. **引用与元数据帧**：`{"references":[...],"metadata":{...}}` —— **同样没有 `type` 字段**，需靠 `references` / `metadata` 键存在来识别（两种模式都会推一次，位置在答案正文之后）。
+2. **引用与元数据帧**：`{"references":[...],"metadata":{...}}` —— **同样没有 `type` 字段**，需靠 `references` / `metadata` 键存在来识别（两种模式都会推一次，位置在答案正文之后）。`references` 项包含 `source_type`，用于选择知识库或会话附件预览接口。
 3. **带 `type` 的事件帧**：`message_saved`（传了 `session_id` 时的落库回执）以及 `agent` 模式的全部过程事件（见 6.3.1）。
 
 ```bash
@@ -1336,7 +1410,7 @@ curl $BASE/api/sessions/<session_id>/messages \
     "attachments":[{"file_id":"sf-9a2b...","filename":"contract.pdf","file_size":33120,"file_type":"pdf"}],
     "kb_id":"kb-3f2a...","kb_ids":null,"feedback":null,"created_at":"2026-07-01T04:10:00Z" },
   { "id":"msg-2","role":"assistant","content":"保修期为 12 个月。",
-    "references":[{ "doc_id":"doc-71bc...","chunk_id":"ck-1","filename":"manual.pdf","content":"父块…","child_content":"子块…","score":0.83 }],
+    "references":[{ "doc_id":"doc-71bc...","chunk_id":"ck-1","filename":"manual.pdf","source_type":"knowledge_base","content":"父块…","child_content":"子块…","score":0.83 }],
     "agent_steps":[
       { "type":"reasoning_delta","content":"需要先查保修期条款","iteration":0 },
       { "type":"tool_call","tool_name":"knowledge_search","tool_call_id":"call_1","arguments":{"query":"保修期"},"iteration":0 },
@@ -1350,7 +1424,7 @@ curl $BASE/api/sessions/<session_id>/messages \
 ]
 ```
 
-兼容性提示：早期版本落库的 `agent_steps` 元素**没有 `type` 字段**（形如 `{step, detail}`），第三方回放时按「数组内是否存在带 `type` 的元素」判别新旧格式，旧格式退化为纯文本步骤列表即可。`hybrid` / `direct` 模式的 assistant 消息 `agent_steps` 为 `null`，正常按纯正文 + `references` 渲染。
+兼容性提示：早期版本落库的 `references` 元素**没有 `source_type` 字段**，消费方应按 `knowledge_base` 兼容处理。早期版本落库的 `agent_steps` 元素**没有 `type` 字段**（形如 `{step, detail}`），第三方回放时按「数组内是否存在带 `type` 的元素」判别新旧格式，旧格式退化为纯文本步骤列表即可。`hybrid` / `direct` 模式的 assistant 消息 `agent_steps` 为 `null`，正常按纯正文 + `references` 渲染。
 
 ### 7.4 重命名会话
 
@@ -2496,3 +2570,32 @@ Agent 使用 `todo_write` 时会额外发送 `todo_update` SSE 事件：
 - 正常自然结束前，服务端会在模型遗漏最终 bookkeeping 时补发一个 `finalized=true` 的全完成快照。
 - 不消费该事件不影响对话正文、引用、工具结果或会话历史。
 - Artoo 平台前端在其输入框上方渲染 Codex 风格任务条：默认折叠显示完成进度和当前步骤，点击后展开完整任务列表。
+
+### 2026-10-19：材料字数与 Token 估算接口
+
+新增只读接口 `POST /api/materials/token-estimate`（见 4.13）：
+
+- 请求按 `knowledge_base_id` 或 `file_ids` 二选一，支持全库估算与指定文档估算；
+- 响应固定为 `{"result": ...}`，包含总字符数、总 token 数、编码、降级标记和逐文件明细；
+- token 使用 `tiktoken` `cl100k_base` 对父块解析文本估算，不重复计入子块；
+- 调用范围沿用现有 JWT / API Key / 代理 Key / AK/SK 鉴权与 KB 读权限边界。
+
+### 2026-10-28：Agent 引用补充来源类型
+
+`/api/retrieval/agent`、`/v1/chat/completions` 及其 SSE `references` 事件、会话历史消息中的引用项新增可选字段 `source_type`：
+
+```json
+{
+  "doc_id": "file-2a3d...",
+  "chunk_id": "ck-9",
+  "filename": "合同.pdf",
+  "source_type": "session",
+  "content": "会话附件父块…",
+  "child_content": "命中子块…",
+  "score": 0.77
+}
+```
+
+- `knowledge_base`：`doc_id` 是 `Document.id`，原件走 `GET /api/documents/{doc_id}/raw`；
+- `session`：`doc_id` 是当前会话的 `SessionFile.id`，原件走 `GET /api/sessions/{session_id}/files/{doc_id}/raw`；
+- 新响应始终返回该字段。早期历史引用可能缺失，按 `knowledge_base` 兼容；忽略该字段不影响正文和其他引用字段。

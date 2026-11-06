@@ -256,11 +256,24 @@ class ListDocumentsTool(BaseTool):
                 f"again with page={next_page}.]"
             )
 
+        files = [
+            {
+                "id": document["doc_id"],
+                "filename": document["filename"],
+                "source": document["source"],
+            }
+            for document in documents
+        ]
+
         return ToolResult(
             success=True,
             output="\n".join(lines),
             data={
                 "documents": documents,
+                # The SSE tool_result contract carries only lightweight file
+                # references. Keep the richer catalog fields under "documents"
+                # while exposing the same page through the shared UI contract.
+                "files": files,
                 "total": total,
                 "page": page,
                 "page_size": page_size,

@@ -11,7 +11,11 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.agent.config import AgentConfig
 from app.agent.engine import AgentEngine
 from app.agent.events import EventBus, EventType
-from app.agent.json_repair import parse_json_with_repair, parse_tool_arguments
+from app.agent.json_repair import (
+    canonicalize_tool_arguments_for_replay,
+    parse_json_with_repair,
+    parse_tool_arguments,
+)
 from app.agent.memory.token_estimator import TokenEstimator
 from app.agent.retrieval_postprocess import postprocess_retrieval
 from app.agent.state import AgentState
@@ -21,6 +25,7 @@ from app.agent.tools.list_documents import ListDocumentsTool
 from app.agent.tools.read_document import ReadDocumentTool
 from app.agent.tools.search_knowledge import SearchKnowledgeTool, SearchTarget
 from app.agent.tools.todo import TodoWriteTool
+from app.api.chat import _agent_event_to_sse, _reconstruct_assistant_turn
 from app.models.provider import LLMToolCall, StreamChunk
 from app.retrieval.base import RetrievalResult
 from app.schema.db import (
@@ -49,6 +54,48 @@ class _EchoTool(BaseTool):
 
     async def execute(self, args: dict) -> ToolResult:
         return ToolResult(success=True, output="x" * 50)
+
+
+class _MalformedArgumentsLLM:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.messages_by_call: list[list[dict]] = []
+
+    async def stream_with_tools(self, messages, tools, **kwargs):
+        self.messages_by_call.append([dict(message) for message in messages])
+        self.calls += 1
+        if self.calls == 1:
+            yield StreamChunk(
+                tool_calls=[
+                    LLMToolCall("call-1", "echo", '{"query": "annual report"')
+                ],
+                finish_reason="tool_calls",
+            )
+        else:
+            yield StreamChunk(content="finished", finish_reason="stop")
+
+
+class _NonEmptyArgumentsLLM:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.messages_by_call: list[list[dict]] = []
+
+    async def stream_with_tools(self, messages, tools, **kwargs):
+        self.messages_by_call.append([dict(message) for message in messages])
+        self.calls += 1
+        if self.calls == 1:
+            yield StreamChunk(
+                tool_calls=[
+                    LLMToolCall(
+                        "call-1",
+                        "echo",
+                        '{"page": 2, "keyword": "合同"}',
+                    )
+                ],
+                finish_reason="tool_calls",
+            )
+        else:
+            yield StreamChunk(content="finished", finish_reason="stop")
 
 
 class _FakeRetriever:
@@ -159,6 +206,77 @@ def test_tool_registry_enforces_per_tool_output_budget() -> None:
     assert result.success is True
     assert len(result.output) <= 40
     assert "truncated" in result.output
+
+
+def test_tool_arguments_are_canonicalized_for_protocol_replay() -> None:
+    assert canonicalize_tool_arguments_for_replay('{"query":"x",}') == '{"query":"x"}'
+    assert canonicalize_tool_arguments_for_replay('{"query":"x"') == "{}"
+    assert canonicalize_tool_arguments_for_replay("not json") == "{}"
+
+
+def test_engine_replaces_malformed_tool_arguments_before_replay() -> None:
+    llm = _MalformedArgumentsLLM()
+    registry = ToolRegistry()
+    registry.register(_EchoTool())
+    engine = AgentEngine(
+        AgentConfig(system_prompt="stable", max_iterations=3),
+        llm,
+        registry,
+        EventBus(),
+    )
+
+    state = asyncio.run(engine.execute("session", "question"))
+
+    replayed = llm.messages_by_call[1][-2]["tool_calls"][0]["function"]["arguments"]
+    assert json.loads(replayed) == {}
+    assert state.steps[0].tool_calls[0].result.success is False
+    assert "incomplete" in state.steps[0].tool_calls[0].result.error
+    assert "incomplete" in llm.messages_by_call[1][-1]["content"]
+    assert state.final_answer == "finished"
+
+
+def test_non_empty_tool_arguments_survive_events_sse_and_replay() -> None:
+    llm = _NonEmptyArgumentsLLM()
+    registry = ToolRegistry()
+    registry.register(_EchoTool())
+    events = []
+    bus = EventBus()
+
+    async def collect(event):
+        events.append(event)
+
+    bus.on(None, collect)
+    engine = AgentEngine(
+        AgentConfig(system_prompt="stable", max_iterations=3),
+        llm,
+        registry,
+        bus,
+    )
+
+    state = asyncio.run(engine.execute("session", "question"))
+
+    expected = {"page": 2, "keyword": "合同"}
+    tool_call = next(event for event in events if event.type == EventType.TOOL_CALL)
+    assert tool_call.data["arguments"] == expected
+    assert _agent_event_to_sse(tool_call)["arguments"] == expected
+    assert state.steps[0].tool_calls[0].args == expected
+    replayed = llm.messages_by_call[1][-2]["tool_calls"][0]["function"]["arguments"]
+    assert json.loads(replayed) == expected
+
+
+def test_history_replaces_malformed_tool_arguments_before_replay() -> None:
+    messages = _reconstruct_assistant_turn("answer", [
+        {
+            "type": "tool_call",
+            "tool_name": "echo",
+            "tool_call_id": "bad-1",
+            "arguments": '{"query":',
+            "iteration": 0,
+        },
+    ])
+
+    arguments = messages[0]["tool_calls"][0]["function"]["arguments"]
+    assert json.loads(arguments) == {}
 
 
 def test_todo_write_validates_and_tracks_plan() -> None:

@@ -66,6 +66,11 @@ def _has_low_quality_hybrid_text_layer(load_result: LoadResult) -> bool:
     )
 
 
+def _has_page_snapshots(load_result: LoadResult) -> bool:
+    """Return whether the loader supplied whole-page images for page-level OCR."""
+    return any(image.is_page_snapshot for image in load_result.images)
+
+
 def _pdf_pages_requiring_ocr(
     load_result: LoadResult, file_type: str
 ) -> list[int]:
@@ -162,7 +167,8 @@ class ProcessedDocument:
         enriched_children: 经 Enrich（当前 pass-through）后的子块文本，与 embedding 一一对应。
         metadata_list: 与 ``enriched_children`` 一一对应的 chunk 元数据。
         embed_result: 子块的稠密 / 稀疏向量。
-        doc_metadata: 文档级元数据（含 ``ocr_provider`` 等）。
+        doc_metadata: 文档级元数据（含 ``ocr_provider`` 等）；显式空文档带
+            ``empty_content=True``，供会话入库区分合法空内容与切分异常。
         child_to_parent: 子→父反向索引（O(1) 查找，Index 阶段构造 parent_id 用）。
     """
 
@@ -257,7 +263,7 @@ class DocumentPipeline:
 
         Raises:
             UploadCapExceeded: 该 scope 已用 chunk 与本次精确 child chunk 数之和超过生效上限。
-            ValueError: 文档提取文本为空且未配置 OCR 服务。
+            EmptyDocumentContentError: 音频文件需要 ASR，但当前没有可用 ASR 服务。
         """
         if source_kind not in ("kb", "session"):
             raise ValueError(f"非法的 source_kind: {source_kind!r}（仅支持 'kb' / 'session'）")
@@ -281,18 +287,20 @@ class DocumentPipeline:
 
                 asr_result = await self._transcribe_with_limit(file_path)
                 if not asr_result.full_text.strip():
-                    from app.api.errors import EmptyDocumentContentError
-
-                    raise EmptyDocumentContentError("音频转写结果为空")
-
-                load_result = LoadResult(
-                    content=asr_result.full_text,
-                    metadata={
-                        **load_result.metadata,
-                        "asr_provider": asr_result.provider_name,
-                    },
-                    images=[],
-                )
+                    logger.info(
+                        "[%s=%s] 音频转写结果为空，按空文档完成处理",
+                        source_kind,
+                        source_id,
+                    )
+                else:
+                    load_result = LoadResult(
+                        content=asr_result.full_text,
+                        metadata={
+                            **load_result.metadata,
+                            "asr_provider": asr_result.provider_name,
+                        },
+                        images=[],
+                    )
 
             # ─── 2. OCR（与 process() 等价，但不更新 ProgressTracker / 不查 Document） ───
             stripped_content = load_result.content.strip()
@@ -369,10 +377,12 @@ class DocumentPipeline:
                 needs_ocr = True
                 stripped_content = load_result.content.strip()
             else:
+                has_page_snapshots = _has_page_snapshots(load_result)
                 low_quality_hybrid_text = _has_low_quality_hybrid_text_layer(load_result)
                 needs_ocr = (
                     not is_audio
                     and self.ocr_manager
+                    and not has_page_snapshots
                     and (
                         not stripped_content
                         or len(stripped_content) < 10
@@ -407,20 +417,18 @@ class DocumentPipeline:
                             source_id,
                         )
                     else:
-                        from app.api.errors import EmptyDocumentContentError
-
-                        raise EmptyDocumentContentError(
-                            "文档提取文本为空，且 OCR 未识别出内容"
+                        logger.info(
+                            "[%s=%s] 文档提取文本为空且 OCR 未识别出内容，"
+                            "按空文档完成处理",
+                            source_kind,
+                            source_id,
                         )
                 elif not is_audio and (not stripped_content or len(stripped_content) < 10):
                     if not self.ocr_manager:
-                        # 无可提取文本且未配置 OCR：业务输入问题而非服务端故障。
-                        # 会话同步路径透出后由全局 handler 映射 422；KB 异步路径被
-                        # except Exception 捕获并置文档 failed（两路径行为均符合预期）。
-                        from app.api.errors import EmptyDocumentContentError
-
-                        raise EmptyDocumentContentError(
-                            "文档提取文本为空，且未配置 OCR 服务"
+                        logger.info(
+                            "[%s=%s] 未配置 OCR，保留当前提取结果（可能为空）",
+                            source_kind,
+                            source_id,
                         )
 
             final_content = load_result.content
@@ -472,6 +480,7 @@ class DocumentPipeline:
                 (not cleaned_stripped or len(cleaned_stripped) < 10)
                 and self.ocr_manager
                 and not needs_ocr
+                and not _has_page_snapshots(load_result)
                 and not is_audio
             ):
                 ocr_result = await self.ocr_manager.recognize_document(file_path)
@@ -494,7 +503,7 @@ class DocumentPipeline:
                     )
 
             # ─── 2.6 剥离内嵌 base64 图片 ───
-            # 放在所有 OCR 分支（主路径 / 嵌入图片 / 兜底）收敛之后、空内容校验之前，
+            # 放在所有 OCR 分支（主路径 / 嵌入图片 / 兜底）收敛之后、空内容分支之前，
             # 一处覆盖全部来源。与 cleaner 不同，此步**无条件执行**：base64 是数据卫生
             # 问题而非去噪偏好，enable_cleaner=False 的知识库同样不该把它带进向量库。
             if final_content:
@@ -507,15 +516,30 @@ class DocumentPipeline:
                         source_kind, source_id, _stripped, _before_len,
                     )
 
-            # OCR / 转写 / 清洗全部走完仍无内容 → 明确失败，而不是入库一个 0 chunk 的空文档。
-            # 常见成因：OCR 服务不支持该文件类型（如只收图片的服务收到 PDF），
-            # 或扫描件质量过差。此处给出可操作的提示，避免"处理成功但检索不到"。
+            # OCR / 转写 / 清洗全部走完仍无内容：空文档是合法输入，不应进入失败重试
+            # 或写入占位 chunk。直接返回零 chunk 产物，让上层以 completed + chunk_count=0
+            # 表示“处理成功但无可检索内容”。
             if not final_content.strip() and not load_result.pre_chunked:
-                from app.api.errors import EmptyDocumentContentError
+                from app.pipeline.chunker import ChunkResult
+                from app.pipeline.embedder import EmbedResult
 
-                raise EmptyDocumentContentError(
-                    "文档未提取到任何文本："
-                    "若为扫描件请确认 OCR 服务可用且支持该文件类型"
+                logger.info(
+                    "[%s=%s] 文档无文本内容，按空文档完成处理",
+                    source_kind,
+                    source_id,
+                )
+                return ProcessedDocument(
+                    chunk_result=ChunkResult(
+                        parent_chunks=[],
+                        child_chunks=[],
+                        parent_child_map={},
+                        context_headers=[],
+                    ),
+                    enriched_children=[],
+                    metadata_list=[],
+                    embed_result=EmbedResult(dense_vectors=[], sparse_vectors=[]),
+                    doc_metadata={**load_result.metadata, "empty_content": True},
+                    child_to_parent={},
                 )
 
             # ─── 3. Chunk ───
@@ -945,12 +969,15 @@ class DocumentPipeline:
 
                 # 文档入库完成后非阻塞触发知识图谱抽取（双开关 + 队列门控，任何故障不影响
                 # 主入库结果；fire-and-forget 不阻塞 process 返回）。Req 1.1 / 1.2 / 4.1。
-                self._fire_graph_extract(doc_id=doc_id, kb_id=kb_id, tenant_id=kb_tenant_id)
-                self._fire_document_summary(
-                    doc_id=doc_id,
-                    kb_id=kb_id,
-                    tenant_id=kb_tenant_id,
-                )
+                if child_count:
+                    self._fire_graph_extract(
+                        doc_id=doc_id, kb_id=kb_id, tenant_id=kb_tenant_id
+                    )
+                    self._fire_document_summary(
+                        doc_id=doc_id,
+                        kb_id=kb_id,
+                        tenant_id=kb_tenant_id,
+                    )
 
                 total_duration_ms = int((time.monotonic() - pipeline_start) * 1000)
                 pl.summary(total_duration_ms)
@@ -1291,10 +1318,12 @@ class DocumentPipeline:
     async def _process_embedded_images(
         self, load_result: LoadResult, doc_id: str
     ) -> str:
-        """处理嵌入图片：并发 OCR 识别，按页位置将图片文本插入到对应页面文本之后
+        """处理嵌入图片，并对整页快照执行替换式 OCR。
 
         对 PDF 中已由可信文本层覆盖的整页扫描底图跳过 OCR，避免同一页的隐藏文本层
-        与扫描图 OCR 结果被拼接成双份正文。普通嵌入图片仍按原有规则处理。
+        与扫描图 OCR 结果被拼接成双份正文。DOCX 的图片页使用整页快照，识别文本直接
+        替换该页文本层；同一文档存在整页快照时，不再追加任何局部图片 OCR 结果。
+        普通嵌入图片仍按原有规则处理。
 
         Args:
             load_result: 文档加载结果
@@ -1303,9 +1332,18 @@ class DocumentPipeline:
         Returns:
             合并了图片 OCR 文本的最终文档文本
         """
+        page_snapshots = [
+            image for image in load_result.images
+            if image.is_page_snapshot
+        ]
+        if page_snapshots:
+            return await self._process_page_snapshots(
+                load_result, page_snapshots, doc_id
+            )
+
         images = [
             image for image in load_result.images
-            if not image.is_page_background
+            if not image.is_page_background and not image.is_page_snapshot
         ]
         skipped_page_backgrounds = len(load_result.images) - len(images)
         if skipped_page_backgrounds:
@@ -1368,6 +1406,63 @@ class DocumentPipeline:
             len(final_content),
         )
 
+        return final_content
+
+    async def _process_page_snapshots(
+        self,
+        load_result: LoadResult,
+        snapshots: list[EmbeddedImage],
+        doc_id: str,
+    ) -> str:
+        """OCR whole-page snapshots and replace, never append to, page text layers."""
+        logger.info(
+            "文档 %s 开始按页 OCR %d 张 DOCX 整页快照",
+            doc_id,
+            len(snapshots),
+        )
+        ocr_results = await self._concurrent_ocr_images(snapshots, doc_id)
+        page_texts = list(load_result.page_texts)
+        recognized_pages: set[int] = set()
+
+        for image, ocr_text in zip(snapshots, ocr_results):
+            page_num = image.page_or_index
+            page_idx = page_num - 1
+            if not ocr_text or page_idx < 0 or page_idx >= len(page_texts):
+                continue
+            page_texts[page_idx] = ocr_text
+            recognized_pages.add(page_num)
+
+        if not recognized_pages:
+            logger.warning(
+                "文档 %s 的整页快照 OCR 均未返回文本，保留原文本层",
+                doc_id,
+            )
+            return load_result.content
+
+        load_result.page_texts = page_texts
+        if load_result.page_blocks:
+            load_result.page_blocks = [
+                [] if page_idx + 1 in recognized_pages else blocks
+                for page_idx, blocks in enumerate(load_result.page_blocks)
+            ]
+        if load_result.page_has_usable_text:
+            load_result.page_has_usable_text = [
+                True if page_idx + 1 in recognized_pages else usable
+                for page_idx, usable in enumerate(load_result.page_has_usable_text)
+            ]
+        load_result.metadata = {
+            **load_result.metadata,
+            "ocr_page_numbers": sorted(recognized_pages),
+            "page_ocr_count": len(recognized_pages),
+        }
+
+        final_content = "\n".join(page_texts)
+        logger.info(
+            "文档 %s 整页快照 OCR 完成，成功替换 %d/%d 页",
+            doc_id,
+            len(recognized_pages),
+            len(snapshots),
+        )
         return final_content
 
     async def _transcribe_with_limit(self, file_path: str):
