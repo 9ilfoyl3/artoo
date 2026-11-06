@@ -60,6 +60,7 @@ class TokenEstimator:
         """
         self._encoder = None
         self.is_fallback = False
+        self._calibration_ratio = 1.0
 
         try:
             import tiktoken
@@ -87,6 +88,10 @@ class TokenEstimator:
         Returns:
             token 数量；空字符串返回 0。
         """
+        return self._calibrate(self._raw_estimate_string(text))
+
+    def _raw_estimate_string(self, text: str) -> int:
+        """Estimate without applying provider calibration."""
         if not text:
             return 0
 
@@ -117,15 +122,19 @@ class TokenEstimator:
         Returns:
             该消息的估算 token 数。
         """
+        return self._calibrate(self._raw_estimate_message(msg))
+
+    def _raw_estimate_message(self, msg: dict) -> int:
+        """Estimate one message without applying provider calibration."""
         tokens = PER_MESSAGE_OVERHEAD
-        tokens += self.estimate_string(msg.get("role") or "")
-        tokens += self.estimate_string(msg.get("content") or "")
-        tokens += self.estimate_string(msg.get("name") or "")
+        tokens += self._raw_estimate_string(msg.get("role") or "")
+        tokens += self._raw_estimate_string(msg.get("content") or "")
+        tokens += self._raw_estimate_string(msg.get("name") or "")
 
         for tool_call in msg.get("tool_calls") or []:
             function = tool_call.get("function") or {}
-            tokens += self.estimate_string(function.get("name") or "")
-            tokens += self.estimate_string(function.get("arguments") or "")
+            tokens += self._raw_estimate_string(function.get("name") or "")
+            tokens += self._raw_estimate_string(function.get("arguments") or "")
             tokens += PER_TOOL_CALL_OVERHEAD
 
         return tokens
@@ -142,9 +151,41 @@ class TokenEstimator:
         Returns:
             消息列表的估算总 token 数；空列表返回 0。
         """
+        return self._calibrate(self._raw_estimate_messages(messages))
+
+    def _raw_estimate_messages(self, messages: list[dict]) -> int:
+        """Estimate a message list without applying provider calibration."""
         if not messages:
             return 0
 
-        total = sum(self.estimate_message(msg) for msg in messages)
+        total = sum(self._raw_estimate_message(msg) for msg in messages)
         total += PER_CONVERSATION_TAIL
         return total
+
+    def _calibrate(self, raw_tokens: int) -> int:
+        if raw_tokens <= 0:
+            return 0
+        return max(1, int(raw_tokens * self._calibration_ratio))
+
+    def calibrate_from_usage(
+        self,
+        *,
+        prompt_tokens: int,
+        messages: list[dict],
+        smoothing: float = 0.25,
+    ) -> None:
+        """Calibrate the estimator against authoritative provider usage.
+
+        The ratio is bounded and smoothed to avoid letting one provider quirk
+        destabilize context-window decisions. This is a runtime correction, not
+        a model-specific tokenizer implementation.
+        """
+        raw = self._raw_estimate_messages(messages)
+        if prompt_tokens <= 0 or raw <= 0:
+            return
+        observed = prompt_tokens / raw
+        observed = max(0.5, min(2.0, observed))
+        weight = max(0.0, min(1.0, float(smoothing)))
+        self._calibration_ratio = (
+            (1.0 - weight) * self._calibration_ratio + weight * observed
+        )

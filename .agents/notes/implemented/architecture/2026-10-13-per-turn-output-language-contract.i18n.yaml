@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record: the Git blob hash of each side as of the
+# last confirmed-consistent state. Both languages carry equal authority; after
+# editing either side, bring the other along and re-record both hashes with:
+#   git hash-object .agents/notes/implemented/architecture/2026-10-13-per-turn-output-language-contract.md .agents/notes/implemented/architecture/2026-10-13-per-turn-output-language-contract.zh.md
+2026-10-13-per-turn-output-language-contract.md: 3d695b02b9911e13dc9154ad4c89611f23036d08
+2026-10-13-per-turn-output-language-contract.zh.md: 22ce6e2341a0922e381162fb2e31bef4d5ba9569

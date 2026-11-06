@@ -4,11 +4,12 @@ import asyncio
 import logging
 import os
 import uuid
-from typing import Annotated
+from functools import lru_cache
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, UploadFile, File
 from fastapi.responses import Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,6 +26,7 @@ from app.schema.api import PageResult
 from app.schema.db import (
     Chunk,
     Document,
+    DocumentSummary,
     Folder,
     KnowledgeBase,
     KnowledgeBaseGrant,
@@ -253,6 +255,21 @@ class DocumentResponse(BaseModel):
     created_at: str
 
 
+class DocumentSummaryResponse(BaseModel):
+    """Versioned summary artifact for the document preview UI."""
+
+    doc_id: str
+    status: str
+    summary: str | None = None
+    gist: str | None = None
+    topics: list[str] = []
+    doc_type: str | None = None
+    typical_question: str | None = None
+    content_version: str | None = None
+    chunk_count: int = 0
+    generated_at: str | None = None
+
+
 class ChunkResponse(BaseModel):
     """切片响应"""
     model_config = {"from_attributes": True}
@@ -319,6 +336,7 @@ async def _run_pipeline(file_path: str, doc_id: str, kb_id: str) -> None:
 
         ocr_manager = await load_ocr_manager()
         asr_manager = await load_asr_manager()
+        from app.summary.queue import get_document_summary_queue
 
         pipeline = DocumentPipeline(
             model_manager=manager,
@@ -326,6 +344,7 @@ async def _run_pipeline(file_path: str, doc_id: str, kb_id: str) -> None:
             db_session_factory=async_session,
             ocr_manager=ocr_manager,
             asr_manager=asr_manager,
+            summary_queue=get_document_summary_queue(),
         )
         await pipeline.process(file_path, doc_id, kb_id)
         print(f"[Pipeline] 文档 {doc_id} 处理完成")
@@ -786,6 +805,52 @@ async def get_document(
     )
 
 
+@router.get(
+    "/api/documents/{doc_id}/summary",
+    response_model=DocumentSummaryResponse,
+)
+async def get_document_summary(
+    doc_id: str,
+    identity: IdentityContext = Depends(require_authenticated()),
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Read the durable summary artifact without triggering generation.
+
+    Generation is scheduled only after document ingestion completes and runs
+    in the independent ``pipeline:summaries`` worker lane. This endpoint is a
+    plain read: hovering the file in the UI must never block upload, parsing,
+    indexing, or any other document operation.
+    """
+    document = await db.scalar(select(Document).where(Document.id == doc_id))
+    if document is None:
+        raise CrossTenantError()
+
+    # Reuse the same KB read authorization used by the document list.
+    await _authorize_kb_access(db, identity, document.kb_id, KbAccessEnum.READ)
+
+    artifact = await db.scalar(
+        select(DocumentSummary).where(
+            DocumentSummary.source == "document",
+            DocumentSummary.doc_id == doc_id,
+        )
+    )
+    if artifact is None:
+        return DocumentSummaryResponse(doc_id=doc_id, status="missing")
+
+    return DocumentSummaryResponse(
+        doc_id=doc_id,
+        status=artifact.status,
+        summary=artifact.summary,
+        gist=artifact.gist,
+        topics=list(artifact.topics or []),
+        doc_type=artifact.doc_type,
+        typical_question=artifact.typical_question,
+        content_version=artifact.content_version,
+        chunk_count=artifact.chunk_count or 0,
+        generated_at=artifact.generated_at.isoformat() if artifact.generated_at else None,
+    )
+
+
 @router.post("/api/documents/{doc_id}/retry", response_model=DocumentResponse)
 async def retry_document(
     doc_id: str,
@@ -901,6 +966,14 @@ async def delete_document(
         kb.doc_count -= 1
 
     # 删除文档（ORM cascade 会自动删除关联 chunks）
+    from sqlalchemy import delete as sql_delete
+
+    await db.execute(
+        sql_delete(DocumentSummary).where(
+            DocumentSummary.source == "document",
+            DocumentSummary.doc_id == doc_id,
+        )
+    )
     await db.delete(doc)
     await db.commit()
 
@@ -1103,6 +1176,12 @@ async def batch_delete_documents(
 
     # ─── 批量删除 DB 记录（仅本租户已确认的文档） ───
     await db.execute(sql_delete(Chunk).where(Chunk.doc_id.in_(doc_ids_found)))
+    await db.execute(
+        sql_delete(DocumentSummary).where(
+            DocumentSummary.source == "document",
+            DocumentSummary.doc_id.in_(doc_ids_found),
+        )
+    )
     await db.execute(sql_delete(Document).where(Document.id.in_(doc_ids_found)))
     await db.commit()
 
@@ -1676,6 +1755,123 @@ class FileContentResponse(BaseModel):
     content: str = Field(..., description="解析后的完整原文文本（父块按 chunk_index 有序拼接）")
 
 
+class MaterialTokenEstimateRequest(BaseModel):
+    """Material token-estimation request.
+
+    Exactly one scope is accepted: a knowledge-base id (all visible documents)
+    or a bounded list of KB document ids.
+    """
+
+    knowledge_base_id: str | None = Field(
+        default=None,
+        min_length=1,
+        description="知识库 ID；与 file_ids 二选一",
+    )
+    file_ids: list[str] | None = Field(
+        default=None,
+        min_length=1,
+        max_length=1000,
+        description="知识库文档 ID 列表；与 knowledge_base_id 二选一",
+    )
+
+    @model_validator(mode="after")
+    def _validate_scope(self) -> "MaterialTokenEstimateRequest":
+        has_kb = self.knowledge_base_id is not None
+        has_files = self.file_ids is not None
+        if has_kb == has_files:
+            raise ValueError("knowledge_base_id 与 file_ids 必须二选一")
+        return self
+
+
+class MaterialTokenEstimateFile(BaseModel):
+    """Per-document token and character estimate."""
+
+    file_id: str
+    knowledge_base_id: str
+    filename: str
+    file_type: str
+    status: str
+    character_count: int = Field(..., ge=0)
+    token_count: int = Field(..., ge=0)
+
+
+class MaterialTokenEstimateResult(BaseModel):
+    """Aggregated material-length estimate returned under ``result``."""
+
+    scope: Literal["knowledge_base", "files"]
+    knowledge_base_id: str | None = None
+    document_count: int = Field(..., ge=0)
+    total_characters: int = Field(..., ge=0)
+    total_tokens: int = Field(..., ge=0)
+    encoding: str
+    fallback: bool
+    files: list[MaterialTokenEstimateFile]
+
+
+class MaterialTokenEstimateResponse(BaseModel):
+    """Stable third-party response envelope."""
+
+    result: MaterialTokenEstimateResult
+
+
+_MATERIAL_TOKEN_ENCODING = "cl100k_base"
+
+
+@lru_cache(maxsize=1)
+def _get_material_token_estimator():
+    """Lazily create the shared tiktoken estimator used by the materials API."""
+    from app.agent.memory.token_estimator import TokenEstimator
+
+    return TokenEstimator()
+
+
+async def _record_material_text(
+    parts: list[str],
+    estimator,
+) -> tuple[int, int]:
+    """Estimate one document from its ordered parent chunks."""
+    text = "\n\n".join(parts)
+    token_count = await asyncio.to_thread(estimator.estimate_string, text)
+    return len(text), int(token_count)
+
+
+async def _estimate_material_lengths(
+    db: AsyncSession,
+    docs: list[Document],
+) -> dict[str, tuple[int, int]]:
+    """Return ``{doc_id: (characters, tokens)}`` without materializing the whole KB."""
+    stats = {doc.id: (0, 0) for doc in docs}
+    if not docs:
+        return stats
+
+    estimator = _get_material_token_estimator()
+    result = await db.stream(
+        select(Chunk.doc_id, Chunk.content)
+        .where(
+            Chunk.doc_id.in_([doc.id for doc in docs]),
+            Chunk.parent_id.is_(None),
+        )
+        .order_by(Chunk.doc_id, Chunk.chunk_index)
+    )
+
+    current_doc_id: str | None = None
+    parts: list[str] = []
+    async for doc_id, content in result:
+        if doc_id != current_doc_id:
+            if current_doc_id is not None:
+                stats[current_doc_id] = await _record_material_text(
+                    parts, estimator
+                )
+            current_doc_id = doc_id
+            parts = []
+        parts.append(content or "")
+
+    if current_doc_id is not None:
+        stats[current_doc_id] = await _record_material_text(parts, estimator)
+
+    return stats
+
+
 @router.get("/api/files/{file_id}/content", response_model=FileContentResponse)
 async def get_file_content_by_id(
     file_id: str,
@@ -1739,6 +1935,103 @@ async def get_file_content_by_id(
 
     # 3) 都未命中 / 归属不符 → 404（存在性非泄露）
     raise CrossTenantError()
+
+
+@router.post(
+    "/api/materials/token-estimate",
+    response_model=MaterialTokenEstimateResponse,
+    tags=["Materials"],
+)
+async def estimate_material_tokens(
+    request: MaterialTokenEstimateRequest,
+    identity: IdentityContext = Depends(require_authenticated()),
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Estimate parsed material length for a KB or a bounded set of KB documents.
+
+    The estimate uses the same parent-chunk projection as
+    ``GET /api/files/{file_id}/content``. Child chunks are intentionally excluded
+    because they duplicate parent context. The response always exposes an
+    aggregate under ``result`` plus a per-document breakdown.
+    """
+    _ensure_not_super_admin_content(identity)
+
+    if request.knowledge_base_id is not None:
+        kb = await _authorize_kb_access(
+            db, identity, request.knowledge_base_id, KbAccessEnum.READ
+        )
+        can_write = await _kb_write_allowed(db, identity, kb)
+        conditions = [Document.kb_id == kb.id]
+        if not can_write:
+            conditions.append(Document.status == "completed")
+        docs = list(
+            (
+                await db.execute(
+                    select(Document)
+                    .where(*conditions)
+                    .order_by(Document.created_at, Document.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        scope: Literal["knowledge_base", "files"] = "knowledge_base"
+        knowledge_base_id = kb.id
+    else:
+        requested_ids = list(dict.fromkeys(request.file_ids or []))
+        rows = (
+            await db.execute(select(Document).where(Document.id.in_(requested_ids)))
+        ).scalars().all()
+        docs_by_id = {doc.id: doc for doc in rows}
+        if set(docs_by_id) != set(requested_ids):
+            raise CrossTenantError()
+
+        kbs: dict[str, KnowledgeBase] = {}
+        can_write_by_kb: dict[str, bool] = {}
+        docs: list[Document] = []
+        for doc_id in requested_ids:
+            doc = docs_by_id[doc_id]
+            if doc.kb_id not in kbs:
+                kbs[doc.kb_id] = await _authorize_kb_access(
+                    db, identity, doc.kb_id, KbAccessEnum.READ
+                )
+                can_write_by_kb[doc.kb_id] = await _kb_write_allowed(
+                    db, identity, kbs[doc.kb_id]
+                )
+            if not can_write_by_kb[doc.kb_id] and doc.status != "completed":
+                raise CrossTenantError()
+            docs.append(doc)
+
+        scope = "files"
+        knowledge_base_id = None
+
+    stats = await _estimate_material_lengths(db, docs)
+    files = [
+        MaterialTokenEstimateFile(
+            file_id=doc.id,
+            knowledge_base_id=doc.kb_id,
+            filename=doc.filename,
+            file_type=doc.file_type,
+            status=doc.status,
+            character_count=stats[doc.id][0],
+            token_count=stats[doc.id][1],
+        )
+        for doc in docs
+    ]
+    estimator = _get_material_token_estimator()
+
+    return MaterialTokenEstimateResponse(
+        result=MaterialTokenEstimateResult(
+            scope=scope,
+            knowledge_base_id=knowledge_base_id,
+            document_count=len(files),
+            total_characters=sum(item.character_count for item in files),
+            total_tokens=sum(item.token_count for item in files),
+            encoding=_MATERIAL_TOKEN_ENCODING,
+            fallback=bool(estimator.is_fallback),
+            files=files,
+        )
+    )
 
 
 # 文档详情事件列表单次返回上限（避免大文档一次拉爆，前端展示足够）。

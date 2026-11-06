@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record: the Git blob hash of each side as of the
+# last confirmed-consistent state. Both languages carry equal authority; after
+# editing either side, bring the other along and re-record both hashes with:
+#   git hash-object .agents/notes/implemented/bug-fix/2026-10-28-agent-reference-source-type.md .agents/notes/implemented/bug-fix/2026-10-28-agent-reference-source-type.zh.md
+2026-10-28-agent-reference-source-type.md: d7e230e4d165d9b2b13765ea88a9e2e25293fb85
+2026-10-28-agent-reference-source-type.zh.md: 2c2bc89960f02b46e16107b035b5f4baff6dfc6f

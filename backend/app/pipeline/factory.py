@@ -38,6 +38,8 @@ async def create_pipeline() -> DocumentPipeline:
         if graph_queue is None:
             logger.warning("GRAPH_ENABLE=true 但 pipeline:graph 慢道队列创建失败（Redis 不可用），图谱抽取将不触发")
 
+    from app.summary.queue import get_document_summary_queue
+
     return DocumentPipeline(
         model_manager=model_manager,
         milvus_client=milvus_client,
@@ -45,4 +47,5 @@ async def create_pipeline() -> DocumentPipeline:
         ocr_manager=ocr_manager,
         asr_manager=asr_manager,
         graph_queue=graph_queue,
+        summary_queue=get_document_summary_queue(),
     )

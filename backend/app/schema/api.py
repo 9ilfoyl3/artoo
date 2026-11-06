@@ -105,6 +105,10 @@ class ReferenceItem(BaseModel):
     doc_id: str
     chunk_id: str
     filename: str = ""
+    # 命中来源类型，供调用方选对原件预览接口：
+    #   "knowledge_base" → 知识库文档，原件走 /api/documents/{doc_id}/raw
+    #   "session"        → 会话附件，原件走 /api/sessions/{session_id}/files/{doc_id}/raw
+    source_type: str = "knowledge_base"
     content: str
     child_content: str = ""
     score: float

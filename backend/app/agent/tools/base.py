@@ -1,8 +1,11 @@
 """BaseTool 抽象接口、ToolResult 数据结构与 ToolContext 调用期上下文"""
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 from typing import Any
+
+ToolProgressCallback = Callable[[dict[str, Any]], Awaitable[None]]
 
 
 @dataclass
@@ -13,6 +16,8 @@ class ToolResult:
     output: str = ""
     data: dict[str, Any] | None = None
     error: str = ""
+    # 仅供宿主/前端渲染的通用结构化结果；原始 output 仍只进入模型上下文。
+    structured_content: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -35,6 +40,11 @@ class ToolContext:
     external_user_id: str | None = None
     api_key_id: str | None = None
     request_id: str | None = None
+    # 工具内部长任务的可选进度回调。只存在于调用期上下文，不进入 MCP
+    # caller-context 线上载荷。工具应保持 payload 有界且不包含正文。
+    progress: ToolProgressCallback | None = field(
+        default=None, compare=False, repr=False
+    )
 
     @classmethod
     def from_identity(
@@ -86,6 +96,10 @@ class BaseTool(ABC):
     # 请求信息（kb_ids / session_id 等），无需再接 ctx。仅外部 MCP 工具置 True，
     # ToolRegistry 据此决定调用 execute(args) 还是 execute(args, ctx=...)。
     accepts_context: bool = False
+
+    # Read-only tools may execute concurrently with each other. Tools that
+    # mutate documents, external systems, or Agent state opt out.
+    read_only: bool = True
 
     @property
     @abstractmethod

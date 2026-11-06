@@ -16,10 +16,62 @@ from __future__ import annotations
 
 import logging
 
+from app.agent.memory.context_manager import prune_tool_output
+
 logger = logging.getLogger(__name__)
 
 # 触发压缩的上下文窗口占用比例：超过 max_tokens * 0.8 时从最旧消息组开始截断。
 DEFAULT_CONTEXT_THRESHOLD_RATIO = 0.8
+
+
+def prune_context(
+    messages: list[dict],
+    max_tokens: int,
+    current_tokens: int,
+    *,
+    tail_start_index: int | None = None,
+    threshold_ratio: float = 0.5,
+    head_chars: int = 4096,
+    tail_chars: int = 1024,
+) -> tuple[list[dict], int]:
+    """Prune old tool-result text before invoking LLM history compaction."""
+    if max_tokens <= 0 or len(messages) <= 2:
+        return messages, 0
+    threshold = int(max_tokens * threshold_ratio)
+    if current_tokens <= threshold:
+        return messages, 0
+
+    last_user_idx = tail_start_index
+    if last_user_idx is None:
+        last_user_idx = len(messages) - 1
+        for index in range(len(messages) - 1, 0, -1):
+            if messages[index].get("role") == "user":
+                last_user_idx = index
+                break
+
+    result = list(messages)
+    pruned = 0
+    for index in range(1, last_user_idx):
+        message = result[index]
+        if message.get("role") != "tool":
+            continue
+        content = message.get("content") or ""
+        bounded = prune_tool_output(content, head_chars, tail_chars)
+        if bounded == content:
+            continue
+        replacement = dict(message)
+        replacement["content"] = bounded
+        result[index] = replacement
+        pruned += 1
+
+    if pruned:
+        logger.debug(
+            "[prune_context] pruned %d historical tool results at %d/%d tokens",
+            pruned,
+            current_tokens,
+            max_tokens,
+        )
+    return result, pruned
 
 
 def compress_context(

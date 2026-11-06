@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record: the Git blob hash of each side as of the
+# last confirmed-consistent state. Both languages carry equal authority; after
+# editing either side, bring the other along and re-record both hashes with:
+#   git hash-object .agents/notes/implemented/feature/2026-10-19-material-token-estimation-api.md .agents/notes/implemented/feature/2026-10-19-material-token-estimation-api.zh.md
+2026-10-19-material-token-estimation-api.md: 4e3b9d4e67ead6f13ff2ecfd8838375053ce9e61
+2026-10-19-material-token-estimation-api.zh.md: 0ea15b20e3a605635c2f18f2b83d3675538cde31

@@ -8,7 +8,10 @@ import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '@/components/ui/tooltip'
 import { isImageFilename } from '@/components/chat/SessionFileList'
+import { StructuredResultCard } from '@/components/chat/StructuredResultCard'
+import { summarizeStructuredResult } from '@/components/chat/structuredResultRegistry'
 import type { MessageAttachment, SessionFileResponse } from '@/lib/api'
+import type { StructuredToolContent } from '@/lib/structuredResult'
 import { useArtifactStore, isPreviewable, type ArtifactTarget } from '@/stores/artifactStore'
 
 // 从文件名提取小写扩展名（无点），用于判断是否可预览
@@ -37,6 +40,17 @@ export interface ToolFile {
   source: 'document' | 'session-file'
 }
 
+export interface ToolProgress {
+  phase: 'start' | 'heartbeat' | 'document' | 'complete'
+  completed: number
+  total: number
+  filename?: string
+  success?: boolean
+  cache_hit?: boolean
+  elapsed_ms?: number
+  message?: string
+}
+
 // 内容段落类型：思考、回答、工具调用、工具结果按 SSE 顺序交错排列
 export interface ContentSegment {
   type: 'reasoning' | 'text' | 'tool_call'
@@ -49,6 +63,10 @@ export interface ContentSegment {
   durationMs?: number
   // 本次工具读到的文件（检索类工具解析 doc_id→文件名/来源），用于步骤行内联可点击预览
   files?: ToolFile[]
+  // MCP structuredContent 经后端通用校验后的宿主渲染数据；原始工具文本不在此通道。
+  structuredContent?: StructuredToolContent
+  // 长工具调用的有界进度；仅用于运行中展示，不包含工具正文。
+  progress?: ToolProgress
 }
 
 // 消息类型
@@ -99,6 +117,8 @@ export interface Reference {
   doc_id: string
   chunk_id: string
   filename: string
+  /** 命中来源：知识库文档或当前会话附件，决定原件预览接口。 */
+  source_type?: 'knowledge_base' | 'session'
   content: string
   child_content: string
   score: number
@@ -462,11 +482,19 @@ function formatDuration(ms: number): string {
   return `${m}m${s}s`
 }
 
+function formatToolProgress(progress: ToolProgress): string {
+  if (progress.message) return progress.message
+  if (progress.phase === 'start') return `准备处理 ${progress.total} 个文档`
+  const name = progress.filename ? ` · ${progress.filename}` : ''
+  return `${progress.completed}/${progress.total} 个文档${name}`
+}
+
 // 工具名 → 中文标签映射（步骤行展示用，与 AgentConfig 的 ALL_TOOLS 保持一致）
 const TOOL_LABELS: Record<string, string> = {
-  knowledge_search: '语义检索',
-  grep_chunks: '关键词检索',
-  list_knowledge_chunks: '分页浏览',
+  search_knowledge: '知识召回',
+  list_documents: '文档清单',
+  read_document: '阅读文档',
+  todo_write: '任务清单',
   web_search: '网页搜索',
   read_attachment: '阅读附件',
   read_skill: '加载技能',
@@ -484,6 +512,19 @@ function toolArgSummary(toolName?: string, args?: Record<string, unknown>): stri
     return typeof fn === 'string' && fn ? fn : null
   }
   return null
+}
+
+// 工具调用参数只在展开态展示。即使模型传入空对象也明确显示 `{}`，
+// 避免把“可选参数未提供”误判为链路上参数丢失。
+export function ToolCallArguments({ args }: { args?: Record<string, unknown> }) {
+  return (
+    <div className="space-y-1">
+      <div className="text-[11px] font-medium text-muted-foreground">调用参数</div>
+      <pre className="overflow-x-auto whitespace-pre-wrap break-all rounded-md border border-border/40 bg-muted/30 px-2 py-1.5 font-mono text-[11px] leading-relaxed text-foreground/80">
+        {JSON.stringify(args ?? {}, null, 2)}
+      </pre>
+    </div>
+  )
 }
 
 // 检索类工具读到的文件：在步骤标题行内联展示（与阅读附件同形式，免展开即可见）。
@@ -579,6 +620,13 @@ function StepRow({
   const isSkill = isTool && seg.toolName === 'read_skill'
   const toolLabel = (seg.toolName && TOOL_LABELS[seg.toolName]) || seg.toolName || seg.content || ''
   const argSummary = toolArgSummary(seg.toolName, seg.toolArgs)
+  const structuredSummary = seg.structuredContent
+    ? summarizeStructuredResult(seg.structuredContent)
+    : null
+  const progressSummary = seg.progress ? formatToolProgress(seg.progress) : null
+  const headerSummary = seg.success === undefined && progressSummary
+    ? progressSummary
+    : structuredSummary || argSummary
 
   // read_attachment 步骤：尝试按文件名解析本会话已上传文件，命中可预览类型则可点击预览。
   const attachmentTarget: ArtifactTarget | null = (() => {
@@ -656,8 +704,15 @@ function StepRow({
             ) : readFiles.length > 0 ? (
               <InlineToolFiles files={readFiles} fileTarget={fileTarget} onOpen={openArtifact} />
             ) : (
-              argSummary && (
-                <span className="min-w-0 truncate font-mono text-primary/80">{argSummary}</span>
+              headerSummary && (
+                <span
+                  className={cn(
+                    'min-w-0 truncate',
+                    structuredSummary ? 'text-muted-foreground/80' : 'font-mono text-primary/80'
+                  )}
+                >
+                  {headerSummary}
+                </span>
               )
             )}
             <ToolResultStatus success={seg.success} durationMs={seg.durationMs} />
@@ -686,6 +741,7 @@ function StepRow({
           <div className="px-2.5 pb-2.5 pt-1 border-t border-border/30">
             {isTool ? (
               <div className="space-y-1.5">
+                <ToolCallArguments args={seg.toolArgs} />
                 <p className="text-xs text-muted-foreground">
                   {attachmentTarget ? (
                     <>
@@ -705,9 +761,37 @@ function StepRow({
                   ) : readFiles.length > 0 ? (
                     <>读到 {readFiles.length} 个文件：</>
                   ) : (
-                    <>已调用 <span className="font-mono">{argSummary || toolLabel}</span></>
+                    <>已调用 <span className="font-mono">{headerSummary || toolLabel}</span></>
                   )}
                 </p>
+                {seg.structuredContent && (
+                  <StructuredResultCard
+                    content={seg.structuredContent}
+                    toolName={seg.toolName || ''}
+                    success={seg.success}
+                  />
+                )}
+                {seg.progress && (
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
+                      <span className="truncate">{formatToolProgress(seg.progress)}</span>
+                      {seg.progress.elapsed_ms !== undefined && (
+                        <span className="shrink-0">{formatDuration(seg.progress.elapsed_ms)}</span>
+                      )}
+                    </div>
+                    <div className="h-1 overflow-hidden rounded-full bg-muted">
+                      <div
+                        className="h-full rounded-full bg-primary/70 transition-[width] duration-300"
+                        style={{
+                          width: `${Math.min(
+                            100,
+                            (seg.progress.completed / Math.max(1, seg.progress.total)) * 100
+                          )}%`,
+                        }}
+                      />
+                    </div>
+                  </div>
+                )}
                 {readFiles.length > 0 && (
                   <div className="flex flex-col gap-1">
                     {readFiles.map((f, fi) => {
@@ -888,6 +972,7 @@ export function LegacyStepRow({
           <div className="px-2.5 pb-2.5 pt-1 border-t border-border/30">
             {isTool ? (
               <div className="space-y-1.5">
+                <ToolCallArguments args={seg.toolArgs} />
                 <p className="text-xs text-muted-foreground">
                   {attachmentTarget ? (
                     <>

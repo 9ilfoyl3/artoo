@@ -22,14 +22,17 @@ Provider 暴露三个语义通道：`reasoning`、`content`、`tool_calls`，并
 |---|---|
 | `reasoning_delta` | 用户可见推理/规划增量。 |
 | `tool_call` | 模型发起的工具调用及参数。 |
+| `tool_progress` | 按 tool call ID 关联的长工具边界内进度。 |
 | `tool_result` | 安全的执行元数据；原始工具输出不外发。 |
 | `text_delta` | 用户可见最终答案或兜底答案增量。 |
 | `token_usage` | 当前步骤的上下文用量。 |
 | `turn_end` | 带类型化 `finish_reason` 的回合结束。 |
-| `complete` | 汇总步骤数量与耗时。 |
+| `complete` | 汇总步骤数量、真实总耗时与首答延迟。 |
 | `error` | 用户可读的失败说明。 |
 
 废弃的 `thought`、`final_answer` 事件和工具不属于新契约。旧会话中的历史 agent steps 仍可读取，但新事件按实时 SSE 相同的顺序和结构持久化并回放。前端渲染一条有序 transcript，而不是分离的思考和回答面板。
+
+长工具可以发送 `tool_progress`，不需要新增 transcript 段落。进度只携带有界元数据。`complete.total_duration_ms` 现在表示完整请求耗时；`complete.first_answer_ms` 保留首个 `text_delta` 的延迟，客户端不再把首答延迟与总执行时间混为一谈。
 
 在支持 thinking 的 provider 上，assistant tool-call 轮产生的原生 reasoning 会在后续请求中作为 `reasoning_content` 回喂，符合 DeepSeek 官方多轮工具调用规则。Provider 请求保留上游 `finish_reason`；`turn_end.finish_reason` 按情况暴露 `stop`、`length`、`max_iterations`、`empty` 和 `error`。
 
@@ -53,4 +56,4 @@ Loop 现在只有一条终止规则：模型响应没有 tool calls 就结束回
 
 ## 测试
 
-后端测试覆盖原生 reasoning 与自然文本终止、后接 tool calls 的普通 content 归类为 reasoning、跨 chunk `<think>` 解析、类型化 SSE 事件名、历史结构重建，以及 tool calls 场景下的原生 reasoning 回喂。后端套件结果为 709 passed、35 skipped；`test_kb_list_count_filter.py` 中 3 个既有 fixture 错误与本决策分开跟踪。前端构建和测试覆盖交错 transcript 渲染路径。
+后端测试覆盖原生 reasoning 与自然文本终止、后接 tool calls 的普通 content 归类为 reasoning、跨 chunk `<think>` 解析、类型化 SSE 事件名、工具进度、真实总耗时与首答耗时、历史结构重建，以及 tool calls 场景下的原生 reasoning 回喂。后端套件结果为 800 passed、13 skipped；`test_kb_list_count_filter.py` 中 3 个 fixture setup 错误与本决策分开跟踪。前端构建和测试覆盖交错 transcript 渲染路径。

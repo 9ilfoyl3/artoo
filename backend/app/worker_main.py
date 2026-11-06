@@ -80,6 +80,12 @@ async def main():
         group_name="pipeline-workers",
     )
 
+    # Durable document-summary lane: independent stream/group/worker so model
+    # latency cannot block indexing.
+    from app.summary.service import initialize_document_summary_queue
+
+    summary_queue = await initialize_document_summary_queue(settings.redis_url)
+
     # 创建 Pipeline（通过工厂函数统一组装依赖）
     pipeline = await create_pipeline()
 
@@ -220,6 +226,23 @@ async def main():
         session_worker_task = asyncio.create_task(session_worker.start())
         print("[Worker] 📤 会话文件异步上传 worker 已启动")
 
+    summary_worker = None
+    summary_worker_task = None
+    if summary_queue is not None:
+        from app.api.chat import _get_llm_for_request
+        from app.summary.worker import DocumentSummaryWorker
+
+        summary_llm, _stream, _max_ctx = await _get_llm_for_request(None)
+        summary_worker = DocumentSummaryWorker(
+            queue=summary_queue,
+            llm=summary_llm,
+            max_concurrent=2,
+        )
+        summary_worker_task = asyncio.create_task(summary_worker.start())
+        print("[Worker] 📝 文档摘要制品 worker 已启动")
+    else:
+        print("[Worker] ⚠️ 文档摘要队列不可用，跳过摘要 worker")
+
     # 知识图谱抽取慢道 worker（仅 graph_enable 开启时启动，避免未启用成本 —— Req 9.3）。
     # 独立队列 + 独立并发信号量，与文档入库 worker 物理隔离，绝不挤占主链路（Req 1.2）。
     graph_worker = None
@@ -281,6 +304,8 @@ async def main():
             async def _graceful_shutdown():
                 try:
                     await asyncio.wait_for(worker.stop(), timeout=_SHUTDOWN_TIMEOUT)
+                    if summary_worker is not None:
+                        await asyncio.wait_for(summary_worker.stop(), timeout=_SHUTDOWN_TIMEOUT)
                     if session_worker is not None:
                         await asyncio.wait_for(session_worker.stop(), timeout=_SHUTDOWN_TIMEOUT)
                     if graph_worker is not None:
@@ -300,6 +325,10 @@ async def main():
     await worker.start()
 
     # 主 worker 循环退出后，停止会话上传 worker 并回收其后台任务。
+    if summary_worker is not None:
+        await summary_worker.stop()
+    if summary_worker_task is not None:
+        await asyncio.gather(summary_worker_task, return_exceptions=True)
     if session_worker is not None:
         await session_worker.stop()
     if session_worker_task is not None:

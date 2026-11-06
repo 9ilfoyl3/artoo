@@ -37,12 +37,17 @@ import asyncio
 import logging
 import time
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
 
 from app.agent.tools.base import BaseTool, ToolContext, ToolResult
+from app.agent.tools.structured_result import (
+    StructuredResultValidationError,
+    normalize_structured_content,
+    normalize_output_schema,
+)
 from app.config import get_settings
 from app.mcp import context as mcp_context
 from app.mcp.jsonrpc import JsonRpcError, build_notification, build_request, unwrap_result
@@ -118,6 +123,15 @@ class MCPServerSpec:
     def display_tool_name(self, remote_name: str) -> str:
         prefix = (self.tool_prefix or "").strip()
         return f"{prefix}{remote_name}" if prefix else remote_name
+
+
+@dataclass(frozen=True)
+class MCPCallResult:
+    """一次 MCP tools/call 的文本投影与结构化结果。"""
+
+    text: str
+    structured_content: dict[str, Any] | None
+    is_error: bool
 
 
 def spec_from_config(config: Any) -> MCPServerSpec:
@@ -230,8 +244,8 @@ class MCPRemoteClient:
 
     async def call_tool(
         self, remote_name: str, arguments: dict, ctx: ToolContext | None
-    ) -> tuple[str, bool]:
-        """调用远端工具，返回 ``(文本输出, 是否失败)``。"""
+    ) -> MCPCallResult:
+        """调用远端工具，分别返回模型文本与宿主结构化结果。"""
         transport = await self._resolve_transport()
         if transport == TRANSPORT_LEGACY_REST:
             return await self._legacy_call_tool(remote_name, arguments, ctx)
@@ -243,7 +257,11 @@ class MCPRemoteClient:
         result = await self._rpc(
             "tools/call", params, timeout=get_settings().mcp_call_timeout, ctx=ctx
         )
-        return _extract_text(result), bool(result.get("isError", False))
+        return MCPCallResult(
+            text=_extract_text(result),
+            structured_content=_extract_structured_content(result),
+            is_error=bool(result.get("isError", False)),
+        )
 
     # —— 传输探测 ——
 
@@ -304,10 +322,16 @@ class MCPRemoteClient:
                 raise
             if method == "tools/list":
                 return {"tools": await self._legacy_list_tools()}
-            text, is_error = await self._legacy_call_tool(
+            call_result = await self._legacy_call_tool(
                 params.get("name", ""), params.get("arguments") or {}, ctx
             )
-            return {"content": [{"type": "text", "text": text}], "isError": is_error}
+            result = {
+                "content": [{"type": "text", "text": call_result.text}],
+                "isError": call_result.is_error,
+            }
+            if call_result.structured_content is not None:
+                result["structuredContent"] = call_result.structured_content
+            return result
 
     async def _ensure_handshake(
         self, client: httpx.AsyncClient, endpoint: str
@@ -376,12 +400,20 @@ class MCPRemoteClient:
     def _caller_context(self, ctx: ToolContext | None) -> mcp_context.CallerContext | None:
         """把 Agent 层的 ToolContext 转为 MCP 线上格式；未开启透传时恒为 None。
 
-        转换只在这一处发生：Agent 层不认识 MCP 的线上结构，MCP 层不认识 Agent 的
-        工具上下文，二者字段同名，用 asdict 直转。
+        转换只在这一处发生，并显式列出允许过线的字段。调用期 progress 回调
+        属于本地 Agent 执行控制，不能进入第三方 MCP 载荷。
         """
         if not self._spec.forward_context or ctx is None:
             return None
-        caller = mcp_context.CallerContext(**asdict(ctx))
+        caller = mcp_context.CallerContext(
+            session_id=ctx.session_id,
+            tenant_id=ctx.tenant_id,
+            subject_type=ctx.subject_type,
+            subject_id=ctx.subject_id,
+            external_user_id=ctx.external_user_id,
+            api_key_id=ctx.api_key_id,
+            request_id=ctx.request_id,
+        )
         return None if caller.is_empty else caller
 
     def _caller_headers(self, ctx: ToolContext | None) -> dict[str, str]:
@@ -413,7 +445,7 @@ class MCPRemoteClient:
 
     async def _legacy_call_tool(
         self, remote_name: str, arguments: dict, ctx: ToolContext | None
-    ) -> tuple[str, bool]:
+    ) -> MCPCallResult:
         self._last_transport = TRANSPORT_LEGACY_REST
         url = f"{self._spec.base_url}/mcp/tools/call"
         headers = {
@@ -428,8 +460,12 @@ class MCPRemoteClient:
             response.raise_for_status()
             data = response.json()
         if not isinstance(data, dict):
-            return str(data), False
-        return _extract_text(data), bool(data.get("isError", False))
+            return MCPCallResult(text=str(data), structured_content=None, is_error=False)
+        return MCPCallResult(
+            text=_extract_text(data),
+            structured_content=_extract_structured_content(data),
+            is_error=bool(data.get("isError", False)),
+        )
 
 
 def _parse_body(response: httpx.Response) -> Any:
@@ -477,6 +513,12 @@ def _extract_text(result: dict) -> str:
     return ""
 
 
+def _extract_structured_content(result: dict) -> dict[str, Any] | None:
+    """提取 MCP structuredContent；非法类型交给上层按通用校验器处理。"""
+    value = result.get("structuredContent")
+    return value if isinstance(value, dict) else None
+
+
 # ============================================================
 # 工具包装
 # ============================================================
@@ -491,6 +533,9 @@ class MCPToolWrapper(BaseTool):
 
     # 声明本工具需要调用期上下文，ToolRegistry 据此决定是否传 ctx
     accepts_context = True
+    # Remote tools may have side effects; serialize them unless a future MCP
+    # annotation explicitly proves otherwise.
+    read_only = False
 
     def __init__(
         self,
@@ -500,12 +545,14 @@ class MCPToolWrapper(BaseTool):
         server_url: str,
         spec: MCPServerSpec | None = None,
         remote_name: str | None = None,
+        output_schema: dict[str, Any] | None = None,
     ) -> None:
         self._spec = spec or MCPServerSpec(id="", name=server_url, url=server_url)
         self._name = name
         self._description = description
         self._parameters = parameters
         self._remote_name = remote_name or name
+        self._output_schema = output_schema
         self._client = MCPRemoteClient(self._spec)
 
     @property
@@ -521,17 +568,46 @@ class MCPToolWrapper(BaseTool):
         return self._parameters
 
     @property
+    def output_schema(self) -> dict[str, Any] | None:
+        return self._output_schema
+
+    @property
     def server_name(self) -> str:
         return self._spec.name
 
     async def execute(self, args: dict, ctx: ToolContext | None = None) -> ToolResult:
         """调用远端 MCP 工具。输出统一加 untrusted 前缀（外部数据默认不可信）。"""
         try:
-            output, is_error = await self._client.call_tool(self._remote_name, args, ctx)
-            output = _UNTRUSTED_PREFIX + output
-            if is_error:
-                return ToolResult(success=False, output=output, error=output)
-            return ToolResult(success=True, output=output)
+            call_result = await self._client.call_tool(self._remote_name, args, ctx)
+            output = _UNTRUSTED_PREFIX + call_result.text
+
+            structured_content = None
+            if call_result.structured_content is not None:
+                try:
+                    structured_content = normalize_structured_content(
+                        call_result.structured_content,
+                        output_schema=self._output_schema,
+                    )
+                except StructuredResultValidationError as exc:
+                    logger.warning(
+                        "[MCP] tool '%s' (%s) dropped invalid structuredContent: %s",
+                        self._name,
+                        self._spec.name,
+                        exc,
+                    )
+
+            if call_result.is_error:
+                return ToolResult(
+                    success=False,
+                    output=output,
+                    error=output,
+                    structured_content=structured_content,
+                )
+            return ToolResult(
+                success=True,
+                output=output,
+                structured_content=structured_content,
+            )
         except httpx.TimeoutException:
             error_msg = f"MCP tool '{self._name}' timed out (server: {self._spec.name})"
             logger.warning(error_msg)
@@ -628,6 +704,17 @@ async def _discover_from_db(session_factory: Any = None) -> list[MCPToolWrapper]
                 )
                 continue
             claimed[display_name] = spec.name
+            output_schema = None
+            if tool_def.get("outputSchema") is not None:
+                try:
+                    output_schema = normalize_output_schema(tool_def.get("outputSchema"))
+                except StructuredResultValidationError as exc:
+                    logger.warning(
+                        "[MCP] tool '%s' (%s) ignored invalid outputSchema: %s",
+                        display_name,
+                        spec.name,
+                        exc,
+                    )
             wrappers.append(
                 MCPToolWrapper(
                     name=display_name,
@@ -636,6 +723,7 @@ async def _discover_from_db(session_factory: Any = None) -> list[MCPToolWrapper]
                     server_url=spec.url,
                     spec=spec,
                     remote_name=remote_name,
+                    output_schema=output_schema,
                 )
             )
         logger.info(

@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record: the Git blob hash of each side as of the
+# last confirmed-consistent state. Both languages carry equal authority; after
+# editing either side, bring the other along and re-record both hashes with:
+#   git hash-object .agents/notes/implemented/process/2026-10-23-controlled-timeout-document-retry.md .agents/notes/implemented/process/2026-10-23-controlled-timeout-document-retry.zh.md
+2026-10-23-controlled-timeout-document-retry.md: e66b5791501ab51149e8b874787ccbee8899473b
+2026-10-23-controlled-timeout-document-retry.zh.md: 832b1f57fe665856d75bccd55b982d01af62a1df

@@ -13,6 +13,7 @@ class EmbeddedImage:
     content_hash: str = ""       # 图片内容 hash（用于去重）
     description: str = ""        # 可选描述
     is_page_background: bool = False  # PDF 整页扫描底图；页面已有可信文本层时跳过其 OCR
+    is_page_snapshot: bool = False    # 整页渲染图；OCR 成功后替换该页文本而不是追加
 
 
 @dataclass
@@ -24,6 +25,8 @@ class LoadResult:
     page_texts: list[str] = field(default_factory=list)  # 按页文本（用于图片文本按页插入）
     pre_chunked: list[str] = field(default_factory=list)  # loader 预切分的 chunk（跳过 chunker）
     page_blocks: list[list[dict]] | None = None  # 按页文本块（含 bbox），用于 TextCleaner 去噪
+    page_heights: list[float] = field(default_factory=list)  # 按页真实高度，供 bbox 去噪使用
+    page_has_usable_text: list[bool] = field(default_factory=list)  # 按页文本层是否可信
 
 
 class BaseLoader(ABC):

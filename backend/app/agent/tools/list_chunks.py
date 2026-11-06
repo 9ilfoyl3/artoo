@@ -10,6 +10,8 @@ import math
 from sqlalchemy import func, select
 from xml.sax.saxutils import escape as xml_escape
 
+from app.agent.state import AgentState
+from app.agent.evidence import evidence_id_for, register_chunk_evidence
 from app.agent.tools.base import BaseTool, ToolResult
 from app.schema.db import Chunk, SessionChunk
 from app.storage.database import async_session
@@ -23,6 +25,9 @@ class ListKnowledgeChunksTool(BaseTool):
     在 knowledge_search 找到相关文档后，使用此工具深度阅读该文档的完整内容。
     按 chunk 位置顺序返回，支持分页浏览大文档。
     """
+
+    def __init__(self, state: AgentState | None = None):
+        self._state = state
 
     @property
     def name(self) -> str:
@@ -68,6 +73,7 @@ class ListKnowledgeChunksTool(BaseTool):
             page = 1
         if page_size < 1:
             page_size = 20
+        page_size = min(page_size, 100)
 
         logger.info(
             "[ListKnowledgeChunks] doc_id=%s, page=%d, page_size=%d",
@@ -78,9 +84,10 @@ class ListKnowledgeChunksTool(BaseTool):
 
         try:
             async with async_session() as session:
-                # 查询该文档的总 chunk 数（正式知识库 Chunk 表）
+                # 仅读取父块，避免父子块同时返回造成正文重复。
                 count_stmt = select(func.count()).select_from(Chunk).where(
-                    Chunk.doc_id == doc_id
+                    Chunk.doc_id == doc_id,
+                    Chunk.parent_id.is_(None),
                 )
                 total_chunks_result = await session.execute(count_stmt)
                 total_chunks: int = total_chunks_result.scalar() or 0
@@ -109,6 +116,17 @@ class ListKnowledgeChunksTool(BaseTool):
                         output=f'<document_chunks doc_id="{xml_escape(doc_id)}" page="1" total_pages="0" total_chunks="0">\n'
                         f"No chunks found for this document.\n"
                         f"</document_chunks>",
+                        data={
+                            "doc_id": doc_id,
+                            "page": 1,
+                            "page_size": page_size,
+                            "total_pages": 0,
+                            "total_chunks": 0,
+                            "has_more": False,
+                            "next_page": None,
+                            "read_chunks": 0,
+                            "fully_read": False,
+                        },
                     )
 
                 # 计算分页
@@ -133,7 +151,10 @@ class ListKnowledgeChunksTool(BaseTool):
                 else:
                     query_stmt = (
                         select(Chunk)
-                        .where(Chunk.doc_id == doc_id)
+                        .where(
+                            Chunk.doc_id == doc_id,
+                            Chunk.parent_id.is_(None),
+                        )
                         .order_by(Chunk.chunk_index)
                         .offset(offset)
                         .limit(page_size)
@@ -141,23 +162,55 @@ class ListKnowledgeChunksTool(BaseTool):
                 result = await session.execute(query_stmt)
                 chunks = result.scalars().all()
 
-                # XML 格式化输出
+                read_chunks = len(chunks)
+                fully_read = page >= total_pages
+                if self._state is not None:
+                    for chunk in chunks:
+                        register_chunk_evidence(
+                            self._state,
+                            doc_id=doc_id,
+                            chunk_id=chunk.id,
+                            content=chunk.content or "",
+                            source="session-file" if is_session_file else "document",
+                            metadata={"chunk_index": chunk.chunk_index},
+                        )
+                if self._state is not None:
+                    read_ranges = self._state.document_read_ranges.setdefault(
+                        doc_id, set()
+                    )
+                    read_ranges.update(range(offset, offset + len(chunks)))
+                    read_chunks = len(read_ranges)
+                    fully_read = read_chunks >= total_chunks
+                    catalog_entry = self._state.document_catalog.setdefault(doc_id, {})
+                    catalog_entry.update({
+                        "read_chunks": read_chunks,
+                        "total_readable_chunks": total_chunks,
+                        "fully_read": fully_read,
+                    })
+
                 output = self._format_xml_output(
                     doc_id=doc_id,
                     chunks=chunks,
                     page=page,
                     total_pages=total_pages,
                     total_chunks=total_chunks,
+                    read_chunks=read_chunks,
+                    fully_read=fully_read,
                 )
-
                 return ToolResult(
                     success=True,
                     output=output,
                     data={
                         "doc_id": doc_id,
                         "page": page,
+                        "page_size": page_size,
                         "total_pages": total_pages,
                         "total_chunks": total_chunks,
+                        "has_more": page < total_pages,
+                        "next_page": page + 1 if page < total_pages else None,
+                        "read_chunks": read_chunks,
+                        "fully_read": fully_read,
+                        "evidence_count": len(self._state.evidence),
                     },
                 )
 
@@ -172,6 +225,8 @@ class ListKnowledgeChunksTool(BaseTool):
         page: int,
         total_pages: int,
         total_chunks: int,
+        read_chunks: int,
+        fully_read: bool,
     ) -> str:
         """生成 XML 格式化输出
 
@@ -186,16 +241,52 @@ class ListKnowledgeChunksTool(BaseTool):
         lines: list[str] = []
         lines.append(
             f'<document_chunks doc_id="{xml_escape(doc_id)}" '
-            f'page="{page}" total_pages="{total_pages}" total_chunks="{total_chunks}">'
+            f'page="{page}" total_pages="{total_pages}" '
+            f'total_chunks="{total_chunks}" read_chunks="{read_chunks}" '
+            f'fully_read="{str(fully_read).lower()}">'
         )
 
         for chunk in chunks:
             position = chunk.chunk_index if chunk.chunk_index is not None else 0
+            evidence_id = (
+                self._state.evidence_by_chunk.get(chunk.id)
+                if self._state is not None
+                else evidence_id_for(doc_id, chunk.id)
+            )
+            evidence_attr = (
+                f' evidence_id="{xml_escape(evidence_id)}"'
+                if evidence_id
+                else ""
+            )
             lines.append(
-                f'<chunk position="{position}" chunk_id="{xml_escape(chunk.id)}">'
+                f'<chunk position="{position}" chunk_id="{xml_escape(chunk.id)}"'
+                f'{evidence_attr}>'
             )
             lines.append(f"<content>{xml_escape(chunk.content)}</content>")
             lines.append("</chunk>")
 
         lines.append("</document_chunks>")
+        if fully_read:
+            lines.append("[Document fully read.]")
+        else:
+            lines.append(
+                f"[Document not fully read. Call list_knowledge_chunks again "
+                f"with page={page + 1}.]"
+            )
         return "\n".join(lines)
+
+
+class ReadDocumentTool(ListKnowledgeChunksTool):
+    """Preferred generic document reader; preserves legacy list tool behavior."""
+
+    @property
+    def name(self) -> str:
+        return "read_document"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Read a complete document by doc_id, one bounded page at a time. "
+            "Returns read_chunks and fully_read so collection tasks can verify "
+            "coverage. Continue with next_page until fully_read=true."
+        )

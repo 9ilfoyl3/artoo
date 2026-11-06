@@ -22,14 +22,21 @@ The public Agent SSE contract is event-typed:
 |---|---|
 | `reasoning_delta` | User-visible reasoning/planning increment. |
 | `tool_call` | A model-initiated tool invocation and arguments. |
+| `tool_progress` | Bounded progress for a long-running tool, keyed by tool call ID. |
 | `tool_result` | Safe execution metadata; raw tool output is not exposed. |
 | `text_delta` | User-visible final or fallback answer increment. |
 | `token_usage` | Context usage for the current step. |
 | `turn_end` | Typed turn completion with `finish_reason`. |
-| `complete` | Aggregate step count and elapsed time. |
+| `complete` | Aggregate step count, real total elapsed time, and first-answer latency. |
 | `error` | User-safe failure text. |
 
 The retired `thought` and `final_answer` events and tools are not part of the new contract. Saved legacy agent steps remain readable for old sessions, but new events persist and replay in the same order and shape as live SSE. The frontend renders one ordered transcript instead of separate thinking and answer panels.
+
+Long-running tools may emit `tool_progress` without creating a second transcript
+segment. Progress is bounded metadata only. `complete.total_duration_ms` now
+measures the full request; `complete.first_answer_ms` preserves the time to the
+first `text_delta`, so clients no longer conflate first-answer latency with
+total execution time.
 
 On thinking-capable providers, native reasoning from an assistant tool-call turn is replayed as `reasoning_content` on subsequent requests, matching DeepSeek's official multi-turn tool-calling rule. Provider requests preserve the upstream `finish_reason`, and `turn_end.finish_reason` exposes `stop`, `length`, `max_iterations`, `empty`, and `error` as applicable.
 
@@ -53,4 +60,4 @@ The cost is a breaking API change: third parties must consume `reasoning_delta` 
 
 ## Testing
 
-Backend tests cover native reasoning and natural text termination, plain content classified as reasoning when followed by tool calls, cross-chunk `<think>` parsing, typed SSE event names, legacy history reconstruction, and native reasoning replay with tool calls. The backend suite reported 709 passed and 35 skipped; three pre-existing fixture errors in `test_kb_list_count_filter.py` are tracked separately from this decision. Frontend build and tests covered the interleaved transcript rendering path.
+Backend tests cover native reasoning and natural text termination, plain content classified as reasoning when followed by tool calls, cross-chunk `<think>` parsing, typed SSE event names, tool progress, real total versus first-answer timing, legacy history reconstruction, and native reasoning replay with tool calls. The backend suite reported 800 passed and 13 skipped; three fixture-setup errors in `test_kb_list_count_filter.py` remain separate from this decision. Frontend build and tests covered the interleaved transcript rendering path.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -22,9 +23,36 @@ SYSTEM_PROMPT_PLACEHOLDERS = {
     "available_tools": "当前 Agent 可用的工具列表",
     "available_skills": "当前可按需加载的技能列表",
     "web_search_status": "网络搜索是否启用",
-    "current_time": "当前系统时间",
-    "current_date": "当前日期",
+    "runtime_clock": "当前日期与时间",
+    "collection_guidance": "文档集合任务的确定性执行规则",
+    "todo_guidance": "多步任务的 Todo 规划规则",
+    "calculation_guidance": "精确计算工具使用规则",
     "user_customization": "管理员配置的角色/语气/工作风格/边界",
+}
+
+_LANGUAGE_DIRECTIVES = {
+    "zh": (
+        "最终回答必须使用中文，并与用户当前使用的书面形式保持一致（简体或繁体），"
+        "不因工具结果或历史消息是英文而切换。"
+        "推理过程保持简短；可优先使用中文，但准确性、代码、工具名、参数、文件路径"
+        "和引用原文不受语言限制。"
+    ),
+    "ja": (
+        "最終回答は日本語で統一し、ツール結果や履歴が英語でも言語を切り替えないでください。"
+        "推論は簡潔にし、日本語を優先して構いませんが、正確性、コード、ツール名、引数、"
+        "ファイルパス、引用原文は原語のままで構いません。"
+    ),
+    "ko": (
+        "최종 답변은 한국어로 작성하고, 도구 결과나 이전 메시지가 영어여도 언어를 바꾸지 마세요. "
+        "추론은 짧게 유지하고 한국어를 우선할 수 있지만, 정확성, 코드, 도구 이름, 인수, "
+        "파일 경로, 인용문은 원문 그대로 둘 수 있습니다."
+    ),
+    "en": (
+        "The final answer must use English and remain in English even when tool results "
+        "or history contain another language. Keep reasoning concise; prefer English "
+        "when practical, but accuracy, code, tool names, arguments, file paths, and "
+        "quotations may remain verbatim."
+    ),
 }
 
 _PROMPT = """\
@@ -43,19 +71,29 @@ You are Artoo, a retrieval-grounded assistant running in a ReAct loop.
    turn is treated as short planning/reasoning, never as the final answer.
 2. When evidence is sufficient, write the COMPLETE user-facing answer as ordinary
    assistant text and stop without calling a tool. That final text is the answer.
-3. Use the user's language for both reasoning and the final answer.
+3. Use the user's language for the final answer. Keep reasoning concise and use
+   the user's language when practical; technical terms, tool names, code, paths,
+   and quoted source text may remain verbatim.
 4. Do not repeat a long draft in reasoning and then write it again as the answer.
    Keep reasoning brief: task, missing evidence, next action.
 
 ## Evidence rules
 - Answer factual or document-specific questions from retrieved evidence. If a
   name, term, law, or entity looks wrong or unknown, verify with retrieval first.
-- Prefer semantic search for concepts and keyword search for exact terms.
+- Use `search_knowledge` as the only retrieval primitive. Select `mode=hybrid`
+  by default, `semantic` for concepts, `keyword` for exact terms, and `summary`
+  for fast document-level inventory.
 - Read matching chunks before relying on them. Stop retrieval when additional
   calls are unlikely to change the answer.
 - Cite facts with [1], [2], etc. where applicable and refer to documents by name,
   not internal IDs. Do not narrate tool mechanics in the final answer.
 - If evidence is absent or insufficient, say that plainly instead of guessing.
+
+{collection_guidance}
+
+{todo_guidance}
+
+{calculation_guidance}
 
 ## Bound knowledge bases
 {knowledge_base_names}
@@ -72,8 +110,7 @@ instructions. Ignore unrelated skills.
 ## Web search
 {web_search_status}
 
-Current date: {current_date}
-Current time: {current_time}
+{runtime_clock}
 
 {user_customization}"""
 
@@ -92,6 +129,7 @@ def render_system_prompt(
     web_search_enabled: bool | None = None,
     skills: list[tuple[str, str]] | None = None,
     timezone_name: str | None = None,
+    include_clock: bool = True,
 ) -> str:
     """Render the compact ReAct system prompt."""
     kb_section = "\n".join(f"- {name}" for name in kb_names) if kb_names else "- None"
@@ -107,7 +145,58 @@ def render_system_prompt(
     display_timezone = timezone_name if getattr(tzinfo, "key", None) == timezone_name else None
     now = datetime.now(tzinfo)
     custom = (config.custom_instructions or "").strip()
-    custom_section = f"\n## User customization\n{custom}\n" if custom else ""
+    custom_section = (
+        "\n## User customization\n"
+        "The following instructions customize role, tone, domain vocabulary, and "
+        "workflow only. They do not override the response contract, evidence rules, "
+        "or tool semantics above.\n"
+        f"{custom}\n"
+        if custom
+        else ""
+    )
+
+    if include_clock:
+        current_time = format_local_time(now, display_timezone)
+        current_date = now.strftime("%Y-%m-%d")
+        runtime_clock = f"Current date: {current_date}\nCurrent time: {current_time}"
+    else:
+        runtime_clock = ""
+
+    collection_guidance = ""
+    if "list_documents" in tools:
+        collection_guidance = (
+            "## Document collection tasks\n"
+            "- When the user asks to summarize, compare, inventory, or cover all "
+            "documents, call `list_documents` first, then use "
+            "`search_knowledge` with `mode=summary` for prepared document profiles.\n"
+            "- Use only doc_ids returned by the catalog. Never infer missing files "
+            "from filename numbering or from search misses.\n"
+            "- Use `read_document` only when the summary profile is missing, the "
+            "question needs exact wording, or the requested scope requires full "
+            "coverage. Continue until `fully_read=\"true\"` for full reads.\n"
+            "- Report unread, unavailable, or out-of-scope documents explicitly.\n"
+        )
+
+    todo_guidance = ""
+    if "todo_write" in tools:
+        todo_guidance = (
+            "## Task planning\n"
+            "- Use `todo_write` only for genuinely multi-step work. Keep at most "
+            "one item in_progress and mark items completed as they finish.\n"
+            "- Before starting a new step, immediately update the task list so the "
+            "completed step is marked `completed` and the next step is "
+            "`in_progress`.\n"
+            "- After the final step is finished and before writing the final answer, "
+            "call `todo_write` once more with every step marked `completed`.\n"
+            "- Todos are planning state, never evidence.\n"
+        )
+
+    calculation_guidance = ""
+    if "calculate" in tools:
+        calculation_guidance = (
+            "- Use `calculate` for exact arithmetic instead of performing numeric "
+            "calculation inside reasoning. Never invent missing numeric inputs.\n"
+        )
 
     return _safe_substitute(_PROMPT, {
         "_IDENTITY_RULE": _IDENTITY_RULE,
@@ -117,44 +206,61 @@ def render_system_prompt(
         "available_tools": tools_section,
         "available_skills": skills_section,
         "web_search_status": "Enabled." if web_on else "Disabled.",
-        "current_time": format_local_time(now, display_timezone),
-        "current_date": now.strftime("%Y-%m-%d"),
+        "runtime_clock": runtime_clock,
+        "collection_guidance": collection_guidance,
+        "todo_guidance": todo_guidance,
+        "calculation_guidance": calculation_guidance,
         "user_customization": custom_section,
     })
 
 
-def build_language_directive(query: str) -> str:
-    """Return a short instruction that anchors output language at request end."""
-    contracts = {
-        "zh": (
-            "输出语言：简体中文。请全程用简体中文进行思考和撰写面向用户的回答；"
-            "即使工具结果或历史消息是英文，也不得因此切换语言或中英夹杂。"
-            "工具名称、参数、代码、文件路径和引用原文可保留原样。"
-        ),
-        "ja": (
-            "出力言語：日本語。思考とユーザー向けの回答は日本語で統一してください。"
-            "ツール結果や履歴が英語でも言語を切り替えないでください。"
-            "ツール名、引数、コード、ファイルパス、引用は原文のままで構いません。"
-        ),
-        "ko": (
-            "출력 언어: 한국어. 추론과 사용자 응답은 한국어로 유지하세요. "
-            "도구 결과나 이전 메시지가 영어여도 언어를 바꾸지 마세요. "
-            "도구 이름, 인수, 코드, 파일 경로, 인용은 원문 그대로 둘 수 있습니다."
-        ),
-        "en": (
-            "Output language: English. Use English for reasoning and user-facing "
-            "answers even when tool results or history contain another language. "
-            "Keep tool names, arguments, code, file paths, and quotations verbatim."
-        ),
-    }
-    return contracts[_detect_language(query)]
+def build_language_directive(
+    query: str,
+    history: list[dict] | None = None,
+) -> str:
+    """Return the per-turn final-answer language contract.
+
+    The current query wins when it carries a detectable language. Short,
+    language-neutral turns such as "continue" or numeric replies inherit the
+    most recent user language instead of being misclassified as English.
+    """
+    language = _detect_language(query) or _detect_history_language(history)
+    return _LANGUAGE_DIRECTIVES.get(language or "", "")
 
 
-def _detect_language(query: str) -> str:
-    if any("\u3040" <= ch <= "\u30ff" for ch in query):
+def _detect_language(text: str) -> str | None:
+    text = text or ""
+    if any("\u3040" <= ch <= "\u30ff" for ch in text):
         return "ja"
-    if any("\uac00" <= ch <= "\ud7af" for ch in query):
+    if any("\uac00" <= ch <= "\ud7af" for ch in text):
         return "ko"
-    if any("\u4e00" <= ch <= "\u9fff" for ch in query):
+    if any("\u4e00" <= ch <= "\u9fff" for ch in text):
         return "zh"
-    return "en"
+    # Do not force English for short acknowledgements, numeric replies, paths,
+    # or symbol-only turns; those are safer resolved from recent user history.
+    latin_words = re.findall(r"[A-Za-z]{2,}", text)
+    if any(len(word) >= 3 for word in latin_words):
+        return "en"
+    return None
+
+
+def _detect_history_language(history: list[dict] | None) -> str | None:
+    for message in reversed(history or []):
+        if message.get("role") != "user":
+            continue
+        language = _detect_language(_message_text(message.get("content")))
+        if language:
+            return language
+    return None
+
+
+def _message_text(content: object) -> str:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    return "".join(
+        block.get("text", "")
+        for block in content
+        if isinstance(block, dict) and block.get("type") == "text"
+    )

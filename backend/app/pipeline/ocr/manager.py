@@ -208,7 +208,10 @@ class OCRManager:
             return await provider.recognize(file_path)
 
     async def recognize_document(
-        self, file_path: str, provider_name: Optional[str] = None
+        self,
+        file_path: str,
+        provider_name: Optional[str] = None,
+        page_numbers: Optional[list[int]] = None,
     ) -> OCRResult:
         """整篇文档识别：按 Provider 能力准备输入，失败时切换 fallback
 
@@ -218,6 +221,7 @@ class OCRManager:
         Args:
             file_path: 文件路径（PDF / 图片）
             provider_name: 指定 Provider ID，为 None 时使用默认 Provider
+            page_numbers: 仅识别 PDF 的指定页码（从 1 开始）；None 表示全部页面。
 
         Returns:
             OCRResult: 统一格式的识别结果
@@ -234,7 +238,9 @@ class OCRManager:
         )
 
         try:
-            return await self._run_with_capability(primary, file_path)
+            return await self._run_with_capability(
+                primary, file_path, page_numbers=page_numbers
+            )
         except Exception as primary_error:
             logger.warning(
                 "[OCR] Provider '%s' 识别失败: %s: %s",
@@ -248,7 +254,9 @@ class OCRManager:
             logger.info("[OCR] 切换到 fallback Provider: %s", fallback.name)
             try:
                 # fallback 能力可能与 primary 不同，重新做输入准备
-                return await self._run_with_capability(fallback, file_path)
+                return await self._run_with_capability(
+                    fallback, file_path, page_numbers=page_numbers
+                )
             except Exception as fallback_error:
                 logger.error(
                     "[OCR] Fallback Provider '%s' 也失败: %s",
@@ -268,11 +276,18 @@ class OCRManager:
         return None
 
     async def _run_with_capability(
-        self, provider: OCRProvider, file_path: str
+        self,
+        provider: OCRProvider,
+        file_path: str,
+        page_numbers: Optional[list[int]] = None,
     ) -> OCRResult:
         """按能力准备输入并执行识别，最后清理临时产物"""
         prepared = await asyncio.to_thread(
-            prepare_input, file_path, provider.capability, provider.name
+            prepare_input,
+            file_path,
+            provider.capability,
+            provider.name,
+            page_numbers,
         )
         try:
             if prepared.kind == "whole":
@@ -321,15 +336,20 @@ class OCRManager:
         all_conf: list[float] = []
         errors: list[Exception] = []
         for idx, res in enumerate(results):
+            page_num = (
+                prepared.page_numbers[idx]
+                if idx < len(prepared.page_numbers)
+                else idx + 1
+            )
             if isinstance(res, Exception):
                 errors.append(res)
-                pages.append(PageOCRResult(page_num=idx + 1, blocks=[], full_text=""))
+                pages.append(PageOCRResult(page_num=page_num, blocks=[], full_text=""))
                 continue
             # 单图识别的 provider 端页码恒为 1，此处按渲染页序重编号
             page_text = res.full_text
             page_blocks = res.pages[0].blocks if res.pages else []
             pages.append(
-                PageOCRResult(page_num=idx + 1, blocks=page_blocks, full_text=page_text)
+                PageOCRResult(page_num=page_num, blocks=page_blocks, full_text=page_text)
             )
             if res.avg_confidence:
                 all_conf.append(res.avg_confidence)
@@ -353,6 +373,7 @@ class OCRManager:
                 "ocr_page_count": total,
                 "ocr_failed_pages": len(errors),
                 "ocr_truncated_pages": prepared.truncated_pages,
+                "ocr_page_numbers": prepared.page_numbers,
             },
         )
 

@@ -1,0 +1,112 @@
+# Agent Note: Unified recall and durable summary artifacts
+
+Status: implemented
+
+## Problem
+
+Agent 同时暴露了语义重叠的 `knowledge_search`、`grep_chunks`、
+`list_knowledge_chunks`、`list_knowledge_documents` 和
+`summarize_documents`。这扩大了提示词与工具选择面，使小模型的工具选择不稳定，
+也让全库总结一开始就进入长时间模型调用，下一轮无法复用已有结果。检索结果也缺少
+统一的确定性后处理，包括近重复去除、邻块扩展、顺序合并和截断审计。Agent loop
+仍依赖静态 token 估算、总时长式流超时、未严格检查的 JSON、统一工具输出预算，以及
+对所有工具无区分并行执行。
+
+## Decision
+
+Artoo 现在只向模型暴露一个召回原语：`search_knowledge`。它支持
+`hybrid`、`semantic`、`keyword`、`summary` 四种模式。旧召回工具不再注册进
+Agent 预设或内置预设。
+
+文档能力保持精简：
+
+- `list_documents` 返回授权范围内的正式文档与会话文件，支持分页、文件名关键词
+  过滤和摘要制品状态。
+- `read_document` 支持 `doc_id` / `chunk_id`、`offset` / `limit` 顺序读取，以及
+  `query` / `regex` 上下文窗口，并与召回工具使用同一套 KB / 会话授权范围。
+- `todo_write` 是唯一新增的规划工具。它维护 `AgentState` 中有界的任务列表，因会
+  修改 loop 状态，调度器会将其与读取工具之间建立串行屏障。
+
+`todo_write` 会发出携带完整任务快照的 `todo_update` 事件。Chat UI 在输入框上方
+居中渲染 Codex 风格任务胶囊：胶囊常驻并占用布局空间，显示当前步骤（"任务 n/m"，
+即正在执行的步骤的 1-based 序号）；鼠标移入即在其正上方弹出悬浮清单面板——面板
+覆盖在对话之上但不推挤内容；关闭带 ~200ms 延迟，指针在胶囊与面板之间移动不会
+误关，真正离开两块区域后才收起。胶囊与面板同时渲染，
+每行呈现 `pending` / `in_progress` / `completed` 状态。事件同时写入 `agent_steps`，切换会话
+或刷新历史后可恢复最近一次任务状态。模型被要求开始下一步前先将上一步标记完成。
+若模型遗漏最后一步的 bookkeeping，引擎会在正常最终答案前补发
+`finalized=true` 的全完成快照。
+
+`search_knowledge` 执行确定性后处理：精确 chunk ID 去重、规范化内容签名、基于
+token overlap 的近重复去除、子块到父块扩展、有界邻块扩展、相邻父块合并、来源与
+位置稳定排序、FAQ answer 注入，以及挂到工具结果和 SSE 事件上的 retrieval audit。
+
+正式文档与会话文件现在拥有持久化 `DocumentSummary` 制品。索引完成后向
+`pipeline:summaries` Redis Stream 投递任务，独立 worker 以关闭思考的方式生成包含
+`summary`、`gist`、`topics`、`doc_type`、`typical_question` 的 JSON profile。
+制品按父块 ID 与内容版本化。摘要检索读取 PostgreSQL 权威记录，Redis 不是正确性
+依赖。
+
+文档列表通过只读端点 `GET /api/documents/{doc_id}/summary` 暴露制品。React 文件
+网格与列表复用同一个结构化预览组件：悬浮 1 秒显示 tooltip，文件操作菜单打开摘要
+预览对话框。预览不会触发生成；缺失制品时明确显示暂未生成，后台独立 worker 继续
+异步处理。该端点属于 Open API：JWT、API Key、代理 Key 与 AK/SK 调用方均可在
+满足与文档列表相同的 KB 读权限前提下调用。
+
+Agent core 还使用 provider usage 校准 token 估算，按 session 与 prompt 指纹持久化
+压缩 checkpoint，把总流超时替换为逐 chunk stall watchdog，对 JSON 做保守修复但
+拒绝执行截断或非法工具参数，设置按工具独立的输出预算，并将只读并发与 mutation
+barrier 分离。未知外部 MCP 工具在未来的可信注释出现前一律视为 mutation。
+
+## Alternatives considered
+
+**保留旧召回工具名作为别名。** 拒绝，因为别名仍保留模型选择问题、重复工具 schema，
+并让不同检索路径的后处理继续漂移。
+
+**文档上传时同步生成摘要。** 拒绝，因为模型延迟会拖慢入库，并使入库可靠性依赖
+LLM 服务。持久化任务 lane 让源文档先立即可用。
+
+**只在 Redis 保存摘要。** 拒绝，因为缓存逐出或 Redis 重启会丢失制品并触发昂贵
+重算。Redis 只承载队列传输与可选加速，PostgreSQL 拥有版本化 profile。
+
+**用第二个 Milvus collection 检索摘要。** 本改动拒绝。profile 是小体量元数据记录，
+增加第二套一致性域不会改善主检索路径，却会显著增加运维成本。PostgreSQL 词法排序
+足够支持清单与文档发现，精确证据仍由主混合检索器提供。
+
+**把所有工具调用都并行化。** 拒绝，因为外部工具和状态修改可能有副作用。调度器只
+并发连续只读调用，并在 mutation 边界串行化。
+
+**修复并执行截断的工具 JSON。** 拒绝，因为语法可修不代表语义完整。截断参数只会生成
+工具错误 observation，绝不执行。
+
+## Consequences
+
+显式维护工具白名单的预设必须改为新名称。内置预设会自动同步，用户自定义预设仍由
+所有者控制。消费 SSE 工具名的业务系统需要映射旧名到新面。请求 schema 与 MCP
+传输不变。
+
+摘要生成新增一条 Redis Stream lane 和 worker 并发，并新增两张 PostgreSQL 表：
+`document_summaries` 与 `agent_compaction_checkpoints`。摘要失败与入库隔离。
+模型会在检索结果上看到附加的 audit 对象，旧客户端可以忽略。
+
+统一检索器降低了提示词与工具选择歧义；profile 就绪后，全库问题会显著加快。缺失
+profile 时退化为现有文档读取，不伪造摘要。邻块扩展与合并会增加单条结果的上下文，
+但字符上限会确保工具总输出仍受 per-tool budget 约束。
+
+## Testing
+
+`backend/tests/test_unified_knowledge_agent_core.py` 覆盖 JSON 修复与截断拒绝、
+per-tool 输出预算、Todo 校验、确定性检索后处理、token 校准、checkpoint round trip、
+统一 summary 模式、mutation barrier、stall watchdog、文档过滤与摘要状态、授权读取，
+以及摘要 profile 规范化。既有 Agent、retrieval、structured-result 与 data-plane
+套件覆盖兼容敏感 loop 和协议路径。
+前端 `DocumentSummaryPreview` 测试覆盖已完成制品和显式缺失态。
+`backend/tests/test_unified_knowledge_agent_core.py` 同时验证 `todo_update` 事件，
+`frontend/src/components/chat/TaskList.test.tsx` 验证步骤胶囊、悬停弹出的悬浮清单与胶囊到面板的悬停穿越及延迟关闭。
+
+真实 48 文档 KB A/B 运行
+（`backend/benchmarks/results/2026-10-16-unified-agent-ab.json`）显示：search-only
+基线 30.5 秒完成，但 4 次召回只覆盖 46 份可读文档中的 1 份；摘要制品路径使用
+`list_documents` + 1 次 42ms 的 `search_knowledge(mode="summary")`，覆盖全部 46
+份文档，并在 40.2 秒内生成 3,308 字有依据回答。工具调用从 5 次降到 2 次，文件
+覆盖增加 45 份；额外答案时间来自模型生成，而非检索。

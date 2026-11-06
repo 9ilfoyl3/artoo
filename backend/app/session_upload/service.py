@@ -447,7 +447,7 @@ class SessionUploadService:
         Raises:
             FileTooLargeError: 文件大小超 upload_max_file_bytes。
             UploadCapExceeded: Chunk 数超 kb_chunk_cap（Pre_Embed_Gate）。
-            EmptyDocumentContentError: 无可提取文本 / 切分后零 chunk。
+            EmptyDocumentContentError: 非显式空文档却切分出零 chunk（完整性异常）。
         """
         # 1) 文件大小校验
         file_size = len(content)
@@ -528,7 +528,8 @@ class SessionUploadService:
         """组装并写入索引（共享给同步 ``upload`` 与异步 ``process_task``）。
 
         步骤（与原 ``upload`` 内联逻辑等价，抽出以复用、避免重复大段代码）：
-        1. 空文档兜底：``child_count == 0`` → ``EmptyDocumentContentError``。
+        1. 完整性校验：仅当非显式空文档却切出零 child chunk 时抛错；显式空文档
+           正常写 completed + ``chunk_count=0``。
         2. ``ensure_session_files_collection``（幂等建表）。
         3. 组装 Milvus 数据 + 父/子 ``SessionChunk`` 行（``doc_id == file_id``，
            每条带 ``session_id`` 标量做会话隔离）。
@@ -546,12 +547,13 @@ class SessionUploadService:
             真实 child chunk 数（``chunk_count``）。
 
         Raises:
-            EmptyDocumentContentError: 切分后零 child chunk。
+            EmptyDocumentContentError: 非显式空文档切分后零 child chunk。
         """
         child_count = len(processed.enriched_children)
-        if child_count == 0:
-            # 防御性兜底：pipeline 通常已对空内容 raise；走到此处说明切分后零 child
-            # chunk（极端边界），无可建索引内容，统一以 422 优雅提示（非 500）。
+        doc_metadata = processed.doc_metadata or {}
+        if child_count == 0 and not doc_metadata.get("empty_content"):
+            # 显式空文档由 pipeline 标记 empty_content，允许 completed + 0 chunk；
+            # 其余零 chunk 结果仍视为切分完整性异常，以 422 优雅提示（非 500）。
             raise EmptyDocumentContentError()
 
         # 共享 collection 幂等建表（首个会话上传时创建）
@@ -704,6 +706,23 @@ class SessionUploadService:
             # DB 写失败 → Milvus 已写入需清理（with 已回滚 DB 事务）。
             await self._safe_cleanup_vectors(file_id)
             raise
+
+        if child_count:
+            try:
+                from app.summary.service import schedule_document_summary
+
+                await schedule_document_summary(
+                    source="session-file",
+                    doc_id=file_id,
+                    session_id=session_id,
+                    tenant_id=tenant_id,
+                )
+            except Exception as exc:  # noqa: BLE001 - summary is best-effort
+                logger.warning(
+                    "会话文件 %s 摘要调度失败（不影响建索引）: %s",
+                    file_id,
+                    exc,
+                )
 
         return child_count
 
@@ -890,6 +909,13 @@ class SessionUploadService:
             await session.delete(row)
             await session.commit()
 
+        try:
+            from app.summary.service import delete_document_summary
+
+            await delete_document_summary("session-file", file_id)
+        except Exception as exc:  # noqa: BLE001 - cleanup is best-effort
+            logger.warning("会话文件 %s 摘要清理失败（非致命）: %s", file_id, exc)
+
         # 删 MinIO 原件（按 session_id/file_id/ext 拼 key）。失败仅记 WARNING。
         await self._safe_remove_object(
             session_file_object_key(session_id, file_id, ext)
@@ -928,6 +954,13 @@ class SessionUploadService:
                 await store.remove_prefix(session_prefix(session_id))
         except Exception as e:
             logger.warning("会话 %s MinIO 原件清理失败（非致命）: %s", session_id, e)
+
+        try:
+            from app.summary.service import delete_session_summaries
+
+            await delete_session_summaries(session_id)
+        except Exception as e:
+            logger.warning("会话 %s 摘要清理失败（非致命）: %s", session_id, e)
 
         try:
             async with self._db_session_factory() as session:
