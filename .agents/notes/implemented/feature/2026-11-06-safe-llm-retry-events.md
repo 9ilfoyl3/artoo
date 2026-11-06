@@ -67,7 +67,7 @@ reasoning and accidental repeated side effects.
 
 ## Testing
 
-`backend/tests/test_llm_retry_events.py` covers retry-event emission and ordering,
+`backend/tests/test_structured_result.py` covers retry-event emission and ordering,
 visible-output retry suppression, structured SSE projection, non-retryable HTTP
 classification, and no post-tool synthesis after exhausted retries.
 `frontend/src/components/chat/MessageBubble.test.tsx` verifies retry and terminal error

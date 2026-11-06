@@ -67,14 +67,14 @@ class LlmFailureInfo:
     @property
     def user_message(self) -> str:
         if self.code == "LLM_STREAM_IDLE_TIMEOUT":
-            return "模型响应超时，已停止等待。请重试。"
+            return "抱歉，处理请求时遇到错误：模型响应超时，已停止等待。请重试。"
         if self.code == "LLM_TIMEOUT":
-            return "模型请求超时，请重试。"
+            return "抱歉，处理请求时遇到错误：模型请求超时，请重试。"
         if self.code == "LLM_RATE_LIMIT":
-            return "模型服务当前繁忙，请稍后重试。"
+            return "抱歉，处理请求时遇到错误：模型服务当前繁忙，请稍后重试。"
         if self.code in {"LLM_SERVER", "LLM_TRANSPORT"}:
-            return "模型服务暂时不可用，请稍后重试。"
-        return "模型请求失败，请重试或调整问题。"
+            return "抱歉，处理请求时遇到错误：模型服务暂时不可用，请稍后重试。"
+        return "抱歉，处理请求时遇到错误：模型请求失败，请重试或调整问题。"
 
 
 class LlmCallFailed(RuntimeError):

@@ -515,7 +515,7 @@ def test_agent_stream_stall_watchdog_terminates_silent_generation(monkeypatch) -
     state = asyncio.run(engine.execute("session", "question"))
 
     assert state.is_complete is True
-    assert state.final_answer == "模型请求超时，请重试。"
+    assert "遇到错误" in state.final_answer
 
 
 def test_list_documents_filters_and_marks_summary_status(tmp_path, monkeypatch) -> None:

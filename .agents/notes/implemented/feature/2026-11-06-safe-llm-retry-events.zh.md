@@ -58,7 +58,7 @@ Agent SSE 和持久化 `agent_steps` 新增 `llm_retry`；`error` 新增可选�
 
 ## Testing
 
-`backend/tests/test_llm_retry_events.py` 覆盖 retry event 的发送与顺序、可见输出后的
+`backend/tests/test_structured_result.py` 覆盖 retry event 的发送与顺序、可见输出后的
 重试抑制、结构化 SSE 投影、不可重试 HTTP 分类，以及重试耗尽后不再执行 tool 后
 synthesis。
 `frontend/src/components/chat/MessageBubble.test.tsx` 验证 retry 与最终 error 行会
