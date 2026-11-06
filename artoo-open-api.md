@@ -2602,3 +2602,201 @@ Agent 使用 `todo_write` 时会额外发送 `todo_update` SSE 事件：
 - `knowledge_base`：`doc_id` 是 `Document.id`，原件走 `GET /api/documents/{doc_id}/raw`；
 - `session`：`doc_id` 是当前会话的 `SessionFile.id`，原件走 `GET /api/sessions/{session_id}/files/{doc_id}/raw`；
 - 新响应始终返回该字段。早期历史引用可能缺失，按 `knowledge_base` 兼容；忽略该字段不影响正文和其他引用字段。
+
+### 2026-11-06：Agent SSE 协议、Provider 超时与安全重试事件
+
+对应 PR：
+
+- [#44 fix(agent): enforce provider-level stream idle timeout](https://github.com/9ilfoyl3/artoo/pull/44)
+- [#45 feat(agent): surface safe LLM retries and failures](https://github.com/9ilfoyl3/artoo/pull/45)
+
+本版本补齐 Agent SSE 的事件协议、传输超时语义和自动重试失败语义。完整字段定义和归约规则见 6.3.1 / 6.3.2；本节记录业务系统升级时必须同步的事项。
+
+#### 13.18 业务系统必须同步的变更
+
+1. 新增 Agent SSE 事件 `llm_retry`，业务前端应渲染为独立的重试状态行，不得拼入正文。
+2. `error` 事件新增可选字段 `code`、`stage`、`retryable`、`attempts`，建议用于错误分类和“是否允许用户重试”的判断。
+3. 当已经产生可见 `reasoning_delta` / `text_delta`，或已经形成完整 tool call 时，服务端不再自动重试；此时应保留已有过程内容并展示结构化错误。
+4. Provider stream idle timeout 默认值改为 **300 秒**。该超时只表示上游 transport 在预算内完全没有活动，不是整轮生成总时长。
+5. `llm_retry` 会进入历史消息的 `agent_steps`；`message_saved`、`references`、`metadata` 不进入 `agent_steps`。
+6. 未识别的 SSE 事件应安全忽略；业务前端不得因新增事件而中断整个解析循环。
+
+#### 13.19 帧分类与结束条件
+
+Agent 模式响应为 `Content-Type: text/event-stream`，每个事件使用 `data: <json>` 承载：
+
+```text
+data: {"type":"reasoning_delta","content":"先检索合同条款。","iteration":0}
+
+```
+
+客户端按以下顺序判别：
+
+1. JSON 同时包含 `references` 和 `metadata`：引用与元数据帧，无 `type`。
+2. JSON 包含 `type`：Agent 具名事件或 `message_saved`。
+3. 其他帧：仅非 Agent 的 OpenAI 兼容模式使用。
+
+Agent 模式**不要求发送 `data: [DONE]`**；HTTP 流 EOF 即表示连接关闭。SSE comment 和空行必须忽略。推荐使用 `fetch()` + `ReadableStream`，因为浏览器原生 `EventSource` 不支持带请求体的 POST。
+
+#### 13.20 Agent SSE 完整事件表
+
+| `type` | 必需字段 | 可选字段 | 前端处理 |
+| --- | --- | --- | --- |
+| `reasoning_delta` | `content`(str)、`iteration`(int) | - | 追加到当前思考段 |
+| `tool_call` | `tool_name`(str)、`tool_call_id`(str)、`arguments`(object)、`iteration`(int) | - | 新建工具段，按 ID 等待结果 |
+| `tool_progress` | `tool_call_id`(str)、`tool_name`(str)、`iteration`(int)、`elapsed_ms`(int) | `phase`、`completed`、`total`、`filename`、`success`、`cache_hit`、`message` | 按 ID 更新已有工具段，不新建行 |
+| `tool_result` | `tool_call_id`(str)、`tool_name`(str)、`success`(bool)、`duration_ms`(int)、`files`(array) | `structured_content`(object)、`retrieval_audit`(object) | 按 ID 回填工具结果 |
+| `todo_update` | `tool_call_id`(str)、`tool_name`(str)、`iteration`(int)、`todos`(array)、`count`(int)、`finalized`(bool) | - | 用完整快照替换任务清单 |
+| `llm_retry` | `message`(str)、`code`(str)、`stage`(str)、`retryable`(bool)、`attempt`(int)、`next_attempt`(int)、`max_attempts`(int)、`delay_ms`(int)、`iteration`(int) | - | 新建重试状态行，不拼入正文 |
+| `text_delta` | `content`(str)、`iteration`(int) | - | 追加到正文；只有该事件进入最终答案 |
+| `token_usage` | `prompt_tokens`(int)、`completion_tokens`(int)、`total_tokens`(int)、`max_context_tokens`(int)、`current_context_tokens`(int) | - | 更新上下文用量 |
+| `turn_end` | `finish_reason`(str) | - | 标记 Agent 本轮结束 |
+| `complete` | `total_steps`(int)、`total_duration_ms`(int)、`first_answer_ms`(int) | - | 展示统计；`total_steps` 是决策轮数，不是工具调用数 |
+| `error` | `content`(str) | `code`(str)、`stage`(str)、`retryable`(bool)、`attempts`(int) | 新建错误状态；保留已有正文 |
+| `message_saved` | `message_id`(str) | - | 回填已落库 assistant 消息 ID |
+
+`tool_progress.phase` 当前取值：`start`、`heartbeat`、`document`、`complete`。
+
+#### 13.21 `llm_retry` 与结构化错误
+
+重试事件示例：
+
+```json
+{
+  "type": "llm_retry",
+  "message": "模型响应中断，正在重试（第 2/3 次）",
+  "code": "LLM_STREAM_IDLE_TIMEOUT",
+  "stage": "tool_call_generation",
+  "retryable": true,
+  "attempt": 1,
+  "next_attempt": 2,
+  "max_attempts": 3,
+  "delay_ms": 1100,
+  "iteration": 0
+}
+```
+
+字段语义：
+
+- `attempt`：刚刚失败的尝试序号，从 `1` 开始。
+- `next_attempt`：即将开始的尝试序号，从 `1` 开始。
+- `max_attempts`：本次模型调用允许的总尝试数，当前默认 `3`。
+- `delay_ms`：进入下一次尝试前的等待时间。
+- `code`：稳定错误码，例如 `LLM_STREAM_IDLE_TIMEOUT`、`LLM_TIMEOUT`、`LLM_RATE_LIMIT`、`LLM_SERVER`、`LLM_TRANSPORT`。
+- `stage`：失败阶段，例如 `waiting_first_event`、`reasoning`、`content`、`tool_call_generation`、`usage`、`finishing`、`llm_call`。
+
+自动重试只发生在安全边界内：没有可见 reasoning/text，且没有形成完整 tool call。已有可见输出后的失败不会自动重试，避免重复展示内容或重复执行副作用。
+
+最终失败示例：
+
+```json
+{
+  "type": "error",
+  "content": "抱歉，处理请求时遇到错误：模型响应超时，已停止等待。请重试。",
+  "code": "LLM_STREAM_IDLE_TIMEOUT",
+  "stage": "tool_call_generation",
+  "retryable": true,
+  "attempts": 3
+}
+```
+
+#### 13.22 推荐成功事件顺序
+
+```text
+reasoning_delta
+llm_retry                       # 可选
+tool_call
+tool_progress                   # 可选
+tool_result
+todo_update                     # 可选
+reasoning_delta
+text_delta
+token_usage
+turn_end
+complete
+references + metadata           # 无 type
+message_saved                   # 有 session_id 且已落库时
+```
+
+完整成功 transcript：
+
+```text
+data: {"type":"reasoning_delta","content":"先检索合同中的保修条款。","iteration":0}
+
+data: {"type":"llm_retry","message":"模型响应中断，正在重试（第 2/3 次）","code":"LLM_STREAM_IDLE_TIMEOUT","stage":"tool_call_generation","retryable":true,"attempt":1,"next_attempt":2,"max_attempts":3,"delay_ms":1100,"iteration":0}
+
+data: {"type":"tool_call","tool_name":"search_knowledge","tool_call_id":"call_search_01","arguments":{"query":"合同 保修期","mode":"hybrid"},"iteration":0}
+
+data: {"type":"tool_result","tool_call_id":"call_search_01","tool_name":"search_knowledge","success":true,"duration_ms":412,"files":[{"id":"doc_71bc","filename":"manual.pdf","source":"document"}],"retrieval_audit":{"raw_count":18,"returned_count":8,"limit":8,"cutoff_applied":true}}
+
+data: {"type":"todo_update","tool_call_id":"call_todo_01","tool_name":"todo_write","iteration":0,"todos":[{"content":"检索保修条款","status":"completed"},{"content":"核对售后责任","status":"in_progress"}],"count":2,"finalized":false}
+
+data: {"type":"text_delta","content":"根据资料，该设备保修期为 12 个月。","iteration":1}
+
+data: {"type":"token_usage","prompt_tokens":2860,"completion_tokens":42,"total_tokens":2902,"max_context_tokens":200000,"current_context_tokens":2902}
+
+data: {"type":"turn_end","finish_reason":"stop"}
+
+data: {"type":"complete","total_steps":2,"total_duration_ms":4210,"first_answer_ms":3180}
+
+data: {"references":[{"doc_id":"doc_71bc","chunk_id":"chunk_9a2","filename":"manual.pdf","source_type":"knowledge_base","content":"保修期为自购买之日起 12 个月。","child_content":"保修期为 12 个月。","score":0.91}],"metadata":{"retrieval_mode":"agent","degraded":false,"llm_degraded":false,"failed_source_count":0,"failed_kb_ids":[],"session_source_failed":false,"kb_source_failed":false}}
+
+data: {"type":"message_saved","message_id":"msg_assistant_001"}
+```
+
+#### 13.23 推荐失败事件顺序
+
+```text
+llm_retry                       # 0~2 次，取决于尝试次数和安全边界
+error
+turn_end(finish_reason="error")
+complete
+references + metadata
+message_saved                   # 有 session_id 且错误内容已落库时
+```
+
+完整失败 transcript：
+
+```text
+data: {"type":"llm_retry","message":"模型响应中断，正在重试（第 2/3 次）","code":"LLM_STREAM_IDLE_TIMEOUT","stage":"tool_call_generation","retryable":true,"attempt":1,"next_attempt":2,"max_attempts":3,"delay_ms":1100,"iteration":0}
+
+data: {"type":"llm_retry","message":"模型响应中断，正在重试（第 3/3 次）","code":"LLM_STREAM_IDLE_TIMEOUT","stage":"tool_call_generation","retryable":true,"attempt":2,"next_attempt":3,"max_attempts":3,"delay_ms":2200,"iteration":0}
+
+data: {"type":"error","content":"抱歉，处理请求时遇到错误：模型响应超时，已停止等待。请重试。","code":"LLM_STREAM_IDLE_TIMEOUT","stage":"tool_call_generation","retryable":true,"attempts":3}
+
+data: {"type":"turn_end","finish_reason":"error"}
+
+data: {"type":"complete","total_steps":0,"total_duration_ms":903000,"first_answer_ms":903000}
+
+data: {"references":[],"metadata":{"retrieval_mode":"agent","degraded":true,"llm_degraded":false,"failed_source_count":0,"failed_kb_ids":[],"session_source_failed":false,"kb_source_failed":false}}
+
+data: {"type":"message_saved","message_id":"msg_assistant_002"}
+```
+
+#### 13.24 历史回放与兼容性
+
+`agent_steps` 按顺序保存 Agent 过程事件。典型结构：
+
+```json
+{
+  "role": "assistant",
+  "content": "根据资料，该设备保修期为 12 个月。",
+  "agent_steps": [
+    {"type":"reasoning_delta","content":"先检索合同条款。","iteration":0},
+    {"type":"llm_retry","message":"模型响应中断，正在重试（第 2/3 次）","code":"LLM_STREAM_IDLE_TIMEOUT","stage":"tool_call_generation","retryable":true,"attempt":1,"next_attempt":2,"max_attempts":3,"delay_ms":1100,"iteration":0},
+    {"type":"tool_call","tool_name":"search_knowledge","tool_call_id":"call_search_01","arguments":{"query":"合同 保修期","mode":"hybrid"},"iteration":0},
+    {"type":"tool_result","tool_call_id":"call_search_01","tool_name":"search_knowledge","success":true,"duration_ms":412,"files":[]},
+    {"type":"text_delta","content":"根据资料，该设备保修期为 12 个月。","iteration":1},
+    {"type":"turn_end","finish_reason":"stop"},
+    {"type":"complete","total_steps":1,"total_duration_ms":4210,"first_answer_ms":3180}
+  ]
+}
+```
+
+兼容性要求：
+
+- `references`、`metadata`、`message_saved` 不进入 `agent_steps`；历史引用来自消息 `references` 字段。
+- `complete` 进入 `agent_steps`。
+- 旧历史可能只有 `{step, detail}`，新前端应以“是否存在 `type` 字段”区分新旧格式。
+- 旧历史可能没有 `llm_retry`、结构化 `error` 字段或 `references[].source_type`；缺失时按旧行为降级。
+- 非 Agent 模式仍使用 OpenAI 兼容 chunk，不包含上述 Agent 状态事件；两类 reducer 不应混用。
