@@ -855,11 +855,12 @@ curl -N -X POST $BASE/v1/chat/completions \
 | `tool_progress` | `tool_call_id`(str)、`tool_name`(str)、`iteration`(int)、`phase`(str)、`completed`(int)、`total`(int)、`filename`(str, optional)、`success`(bool, optional)、`cache_hit`(bool, optional)、`elapsed_ms`(int)、`message`(str, optional) | 长工具调用的有界进度，不新建步骤行。`phase` 为 `start` / `heartbeat` / `document` / `complete`。当前 `summarize_documents` 会按文档完成情况和最长 10 秒心跳发送；旧客户端可忽略 |
 | `tool_result` | `tool_call_id`(str)、`tool_name`(str)、`success`(bool)、`duration_ms`(int)、`files`(array)、`structured_content`(object, optional) | 工具执行结果。按 `tool_call_id` 回填到对应 `tool_call`。`files` 为本次工具读到的文件，每项 `{id, filename, source}`，`source`∈`document`(知识库文档) / `session-file`(会话临时文件)，可据此拼预览链接（见 4.9 / 8.4）。MCP 工具返回合法 `structuredContent` 时，额外透传 `{kind, data}`，供宿主按 `kind` 渲染；原始工具正文仍不外发 |
 | `todo_update` | `tool_call_id`(str)、`tool_name`(str)、`iteration`(int)、`count`(int)、`todos`(array)、`finalized`(bool, optional) | `todo_write` 后的完整任务清单快照。每项 `{content: str, status: "pending"\|"in_progress"\|"completed"}`；宿主应替换当前任务列表，不应按增量拼接。`finalized=true` 表示正常结束前服务端兜底将剩余步骤标记完成。旧客户端可忽略 |
+| `llm_retry` | `message`(str)、`code`(str)、`stage`(str)、`retryable`(bool)、`attempt`(int)、`next_attempt`(int)、`max_attempts`(int)、`delay_ms`(int)、`iteration`(int) | Provider 在安全边界内即将自动重试。`attempt` 是从 1 开始、刚刚失败的尝试序号；`next_attempt` 是即将开始的尝试序号。该事件只表达执行状态，不进入答案正文，旧客户端可忽略 |
 | `text_delta` | `content`(str)、`iteration`(int) | 用户可见正文增量。正常情况来自自然停止的 assistant text；服务端兜底/合成答案也使用同一事件。不要把 answer 承载在 tool call 参数里 |
 | `token_usage` | `prompt_tokens`、`completion_tokens`、`total_tokens`、`max_context_tokens`、`current_context_tokens` | 上下文占用，可用于渲染「上下文已用 x/y」 |
 | `turn_end` | `finish_reason`(str) | Agent 本轮结束原因：`stop`、`max_iterations`、`length`、`error`、`empty` 等。`length` 表示正文可能被单次输出上限截断；`empty` 表示模型重试后仍没有返回内容 |
 | `complete` | `total_steps`(int)、`total_duration_ms`(int)、`first_answer_ms`(int) | 请求结束汇总。`total_duration_ms` 是真实请求总耗时；`first_answer_ms` 是首个 `text_delta` 的时间，便于单独展示首答延迟 |
-| `error` | `content`(str) | 执行出错的可读原因（链路已尽力降级，通常仍会有兜底 `text_delta`） |
+| `error` | `content`(str)、`code`(str, optional)、`stage`(str, optional)、`retryable`(bool, optional)、`attempts`(int, optional) | 执行出错的可读原因与结构化失败信息。模型传输失败不再伪造合成答案；已有可见输出时也不会自动重试，是否有后续 `text_delta` 由宿主历史内容或用户重试决定 |
 | `message_saved` | `message_id`(str) | assistant 消息已落库的 DB 主键，用于后续消息反馈（7.7）与重试（7.8）定位。仅传了 `session_id` 且有正文时推送 |
 
 典型事件序列：
@@ -870,6 +871,7 @@ curl -N -X POST $BASE/v1/chat/completions \
 {"type":"tool_call","tool_name":"knowledge_search","tool_call_id":"call_1","arguments":{"query":"保修期"},"iteration":0}
 {"type":"tool_progress","tool_name":"summarize_documents","tool_call_id":"call_2","iteration":1,"phase":"document","completed":4,"total":20,"filename":"manual.pdf","elapsed_ms":1200}
 {"type":"tool_result","tool_call_id":"call_1","tool_name":"knowledge_search","success":true,"duration_ms":412,"files":[{"id":"doc-71bc...","filename":"manual.pdf","source":"document"}]}
+{"type":"llm_retry","message":"模型响应中断，正在重试（第 2/3 次）","code":"LLM_STREAM_IDLE_TIMEOUT","stage":"tool_call_generation","retryable":true,"attempt":1,"next_attempt":2,"max_attempts":3,"delay_ms":1100,"iteration":1}
 {"type":"text_delta","content":"根据资料，","iteration":1}
 {"type":"text_delta","content":"保修期为 12 个月。","iteration":1}
 {"type":"turn_end","finish_reason":"stop"}
@@ -904,11 +906,12 @@ curl -N -X POST $BASE/v1/chat/completions \
 4. `tool_result`：**不新建段**，按 `tool_call_id` 找到对应 `tool_call` 段，回填 `success` / `duration_ms` / `files` / `structured_content`。宿主可按 `structured_content.kind` 选专属 renderer；未知 `kind` 必须回退到通用 JSON/工具卡。
 5. `text_delta`：与前一段合并（同规则 1，段类型为 `answer`）。
 6. `turn_end`：标记本轮结束；`finish_reason=length` 时提示正文可能被截断。
-7. `error`：不新建过程段；展示错误提示。若其后仍有 `text_delta`，继续按规则 5 归并。
-8. `complete`：`total_duration_ms` 是真实总耗时，`first_answer_ms` 是首答延迟。宿主可分别展示“总耗时”和“首答耗时”。
-9. `token_usage`：更新上下文用量指示。
-10. 兜底：若归约完一段 `answer` 都没有，而消息 `content`（历史回放）非空，补一段 `answer`。
-11. `todo_update`：不新建过程段；用 `todos` 替换当前任务清单 UI。每项按 `status` 渲染 pending / in_progress / completed。
+7. `error`：新建独立错误状态段并展示结构化失败信息；若其后仍有 `text_delta`，继续按规则 5 归并到正文。
+8. `llm_retry`：新建一个独立状态段或状态提示，展示将进行的尝试次数和失败类别；不得并入正文或工具结果。
+9. `complete`：`total_duration_ms` 是真实总耗时，`first_answer_ms` 是首答延迟。宿主可分别展示“总耗时”和“首答耗时”。
+10. `token_usage`：更新上下文用量指示。
+11. 兜底：若归约完一段 `answer` 都没有，而消息 `content`（历史回放）非空，补一段 `answer`；已有 `error` 段时不要重复补正文。
+12. `todo_update`：不新建过程段；用 `todos` 替换当前任务清单 UI。每项按 `status` 渲染 pending / in_progress / completed。
 
 > 只想要「纯答案 + 引用」的第三方可以忽略 `reasoning_delta` / `tool_call` / `tool_result`，只拼接 `text_delta.content` 并读末尾的 `references`，行为等价于普通流式问答。
 
@@ -1402,7 +1405,7 @@ curl $BASE/api/sessions/<session_id>/messages \
 | `feedback` | string/null | `like` / `dislike` / `null`，见 7.7 |
 | `created_at` | datetime | 创建时间 |
 
-**`agent_steps` 是复现步骤面板的关键**：流式过程中每一条 SSE 事件（`reasoning_delta` / `tool_call` / `tool_progress` / `tool_result` / `text_delta` / `token_usage` / `turn_end` / `complete` / `error`）都被原样按序追加进该数组随消息落库，字段结构与 6.3.1 完全一致。因此加载历史时把 `agent_steps` 按 6.3.2 的同一套归约规则重放，即可得到与实时流式**逐字一致**的思考/工具/正文分段展示，无需任何额外接口。
+**`agent_steps` 是复现步骤面板的关键**：流式过程中每一条 SSE 事件（`reasoning_delta` / `tool_call` / `tool_progress` / `tool_result` / `llm_retry` / `text_delta` / `token_usage` / `turn_end` / `complete` / `error`）都被原样按序追加进该数组随消息落库，字段结构与 6.3.1 完全一致。因此加载历史时把 `agent_steps` 按 6.3.2 的同一套归约规则重放，即可得到与实时流式**逐字一致**的思考、重试、工具与正文分段展示，无需任何额外接口。
 
 ```json
 [

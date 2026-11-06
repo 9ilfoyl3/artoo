@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import type { ReactNode } from 'react'
-import { ChevronDown, ChevronUp, Bot, FileText, Loader2, CheckCircle2, XCircle, Lightbulb, Monitor, AlertTriangle, Image as ImageIcon, BookOpen, Copy, Check, ThumbsUp, ThumbsDown, RotateCcw } from 'lucide-react'
+import { ChevronDown, ChevronUp, Bot, FileText, Loader2, CheckCircle2, XCircle, Lightbulb, Monitor, AlertTriangle, Image as ImageIcon, BookOpen, Copy, Check, ThumbsUp, ThumbsDown, RotateCcw, RefreshCw } from 'lucide-react'
 import { Streamdown } from 'streamdown'
 import { cjk } from '@streamdown/cjk'
 import { copyToClipboard } from '@/lib/clipboard'
@@ -53,7 +53,7 @@ export interface ToolProgress {
 
 // 内容段落类型：思考、回答、工具调用、工具结果按 SSE 顺序交错排列
 export interface ContentSegment {
-  type: 'reasoning' | 'text' | 'tool_call'
+  type: 'reasoning' | 'text' | 'tool_call' | 'retry' | 'error'
   content: string  // reasoning/text: 文本内容; tool_call: 工具名
   toolCallId?: string
   toolName?: string
@@ -67,6 +67,15 @@ export interface ContentSegment {
   structuredContent?: StructuredToolContent
   // 长工具调用的有界进度；仅用于运行中展示，不包含工具正文。
   progress?: ToolProgress
+  // Provider 自动重试事件；前端只展示状态，不参与答案拼接。
+  retry?: {
+    attempt: number
+    nextAttempt: number
+    maxAttempts: number
+    delayMs: number
+  }
+  code?: string
+  stage?: string
 }
 
 // 消息类型
@@ -453,6 +462,20 @@ function AgentStreamContent({
               )
             }
 
+            if (seg.type === 'retry') {
+              return (
+                <RetryNotice
+                  key={`retry-${index}`}
+                  seg={seg}
+                  live={isStreaming && isLast && index === visibleSegments.length - 1}
+                />
+              )
+            }
+
+            if (seg.type === 'error') {
+              return <ErrorNotice key={`error-${index}`} seg={seg} />
+            }
+
             return (
               <StepRow
                 key={`${seg.type}-${index}`}
@@ -468,6 +491,47 @@ function AgentStreamContent({
           })}
         </div>
       )}
+    </div>
+  )
+}
+
+function RetryNotice({ seg, live }: { seg: ContentSegment; live: boolean }) {
+  const retry = seg.retry
+  const attemptLabel = retry
+    ? `第 ${retry.nextAttempt}/${retry.maxAttempts} 次`
+    : '下一次'
+  return (
+    <div className="flex items-start gap-2 rounded-lg border border-amber-500/25 bg-amber-500/[0.06] px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
+      <RefreshCw className={cn('mt-0.5 h-3.5 w-3.5 shrink-0', live && 'animate-spin')} />
+      <div className="min-w-0">
+        <p className="font-medium">{seg.content || `模型响应中断，正在重试（${attemptLabel}）`}</p>
+        {retry && retry.delayMs > 0 && (
+          <p className="mt-0.5 text-[10px] text-amber-700/65 dark:text-amber-300/65">
+            预计 {formatDuration(retry.delayMs)} 后重试
+          </p>
+        )}
+        {seg.code && (
+          <p className="mt-0.5 font-mono text-[10px] text-amber-700/65 dark:text-amber-300/65">
+            {seg.code}{seg.stage ? ` · ${seg.stage}` : ''}
+          </p>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function ErrorNotice({ seg }: { seg: ContentSegment }) {
+  return (
+    <div className="flex items-start gap-2 rounded-lg border border-destructive/25 bg-destructive/[0.05] px-3 py-2 text-xs text-destructive">
+      <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+      <div className="min-w-0">
+        <p className="font-medium">{seg.content || '执行出错'}</p>
+        {seg.code && (
+          <p className="mt-0.5 font-mono text-[10px] text-destructive/65">
+            {seg.code}{seg.stage ? ` · ${seg.stage}` : ''}
+          </p>
+        )}
+      </div>
     </div>
   )
 }

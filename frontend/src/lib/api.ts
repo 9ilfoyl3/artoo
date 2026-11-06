@@ -914,6 +914,13 @@ export interface SessionMessageItem {
     first_answer_ms?: number
     todos?: { content: string; status: 'pending' | 'in_progress' | 'completed' }[]
     count?: number
+    code?: string
+    stage?: string
+    retryable?: boolean
+    attempt?: number
+    next_attempt?: number
+    max_attempts?: number
+    delay_ms?: number
     step: string
     detail: string
     max_context_tokens?: number
