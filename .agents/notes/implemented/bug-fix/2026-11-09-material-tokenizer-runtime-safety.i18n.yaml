@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record: the Git blob hash of each side as of the
+# last confirmed-consistent state. Both languages carry equal authority; after
+# editing either side, bring the other along and re-record both hashes with:
+#   git hash-object .agents/notes/implemented/bug-fix/2026-11-09-material-tokenizer-runtime-safety.md .agents/notes/implemented/bug-fix/2026-11-09-material-tokenizer-runtime-safety.zh.md
+2026-11-09-material-tokenizer-runtime-safety.md: c158e08c5098d6b5b07b4820d89e715028441225
+2026-11-09-material-tokenizer-runtime-safety.zh.md: ab62b1b9a86be7bc2996a9412b11d0c321a4d1f8

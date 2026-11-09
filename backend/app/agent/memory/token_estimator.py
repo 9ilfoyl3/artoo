@@ -12,7 +12,9 @@ cl100k_base 仅为近似编码，不同模型族使用不同 tokenizer，因此�
 计数不会完全精确。这是可接受的：估算只需足够接近以在大致正确的时机触发压缩，
 小幅的高估/低估会在下一次 API 调用时被纠正。
 
-IF tiktoken 编码器加载失败，则降级为字符数除以 4 的粗略估算（fallback 模式）。
+IF tiktoken 编码器加载失败，则降级为字符启发式估算（fallback 模式）：ASCII
+按约 4 字符/token、非 ASCII 按约 1 字符/token，避免中文材料被固定除以 4
+造成数量级低估。
 """
 
 from __future__ import annotations
@@ -30,8 +32,8 @@ PER_CONVERSATION_TAIL = 3
 # 每个 tool_call 的固定开销
 PER_TOOL_CALL_OVERHEAD = 4
 
-# fallback 模式下的粗略估算比例：约 4 个字符 ≈ 1 token
-_FALLBACK_CHARS_PER_TOKEN = 4
+# fallback 模式下的粗略估算比例：ASCII 约 4 字符/token，非 ASCII 约 1 字符/token。
+_FALLBACK_ASCII_CHARS_PER_TOKEN = 4
 
 # BPE 编码名称，对应 GPT-3.5/GPT-4 系列
 _ENCODING_NAME = "cl100k_base"
@@ -41,7 +43,8 @@ class TokenEstimator:
     """BPE Token 估算器
 
     使用 tiktoken 的 cl100k_base 编码进行 token 计数。若编码器加载失败，则
-    降级为字符数除以 4 的粗略估算（fallback 模式），并记录 warning 日志。
+    降级为 ASCII/非 ASCII 分开计数的字符启发式估算（fallback 模式），并记录
+    warning 日志。
 
     Attributes:
         is_fallback: 是否处于 fallback 模式（编码器加载失败时为 True）。
@@ -55,8 +58,8 @@ class TokenEstimator:
 
         Note:
             IF tiktoken 编码器加载失败（如未安装或网络问题导致 BPE 词表无法
-            加载），THEN 降级为字符数除以 4 的粗略估算并记录 warning 日志，
-            同时将 is_fallback 置为 True。
+            加载），THEN 降级为字符启发式估算并记录 warning 日志，同时将
+            is_fallback 置为 True。
         """
         self._encoder = None
         self.is_fallback = False
@@ -70,17 +73,16 @@ class TokenEstimator:
             self.is_fallback = True
             logger.warning(
                 "[TokenEstimator] tiktoken 编码器 '%s' 加载失败，降级为 "
-                "字符数 / %d 的粗略估算：%s",
+                "字符启发式估算：%s",
                 encoding_name,
-                _FALLBACK_CHARS_PER_TOKEN,
                 exc,
             )
 
     def estimate_string(self, text: str) -> int:
         """估算单段文本的 token 数
 
-        对文本做 BPE 编码并返回 token 数量。空字符串返回 0。
-        fallback 模式下返回 len(text) // 4 的粗略估算。
+        对文本做 BPE 编码并返回 token 数量。空字符串返回 0。需要区分本段文本
+        是否使用 fallback 时调用 :meth:`estimate_string_with_fallback`。
 
         Args:
             text: 待估算的文本。
@@ -88,23 +90,51 @@ class TokenEstimator:
         Returns:
             token 数量；空字符串返回 0。
         """
-        return self._calibrate(self._raw_estimate_string(text))
+        return self.estimate_string_with_fallback(text)[0]
+
+    def estimate_string_with_fallback(self, text: str) -> tuple[int, bool]:
+        """返回 token 数和本段文本是否使用降级估算。
+
+        文档正文中的 ``<|endoftext|>`` 等字符串必须按普通文本计数，因此编码时
+        显式禁用 tiktoken 的 special-token 检查。否则内容只要包含这些字面量，
+        ``encode`` 就会抛错并让整段文本退回字符估算。
+        """
+        raw_tokens, used_fallback = self._raw_estimate_string_with_fallback(text)
+        return self._calibrate(raw_tokens), used_fallback
+
+    def _fallback_estimate_string(self, text: str) -> int:
+        """Estimate string length without a model tokenizer.
+
+        English/code averages roughly four ASCII characters per token, while CJK
+        text is close to one token per code point in ``cl100k_base``. Counting
+        every character as a quarter token underestimates Chinese by about 4x.
+        """
+        ascii_chars = sum(1 for char in text if ord(char) < 128)
+        non_ascii_chars = len(text) - ascii_chars
+        ascii_tokens = (
+            ascii_chars + _FALLBACK_ASCII_CHARS_PER_TOKEN - 1
+        ) // _FALLBACK_ASCII_CHARS_PER_TOKEN
+        return ascii_tokens + non_ascii_chars
 
     def _raw_estimate_string(self, text: str) -> int:
         """Estimate without applying provider calibration."""
+        return self._raw_estimate_string_with_fallback(text)[0]
+
+    def _raw_estimate_string_with_fallback(self, text: str) -> tuple[int, bool]:
+        """Estimate without calibration and report whether fallback was used."""
         if not text:
-            return 0
+            return 0, False
 
         if self.is_fallback or self._encoder is None:
-            return len(text) // _FALLBACK_CHARS_PER_TOKEN
+            return self._fallback_estimate_string(text), True
 
         try:
-            return len(self._encoder.encode(text))
+            return len(self._encoder.encode(text, disallowed_special=())), False
         except Exception as exc:  # noqa: BLE001 - 编码异常时退回粗略估算
             logger.warning(
                 "[TokenEstimator] BPE 编码失败，本次退回粗略估算：%s", exc
             )
-            return len(text) // _FALLBACK_CHARS_PER_TOKEN
+            return self._fallback_estimate_string(text), True
 
     def estimate_message(self, msg: dict) -> int:
         """估算单条消息的 token 数

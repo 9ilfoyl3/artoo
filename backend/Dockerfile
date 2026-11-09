@@ -26,6 +26,12 @@ RUN pip install --no-cache-dir --prefer-binary -r requirements.txt && \
       pip install --no-cache-dir --prefer-binary -r requirements-graph.txt; \
     fi
 
+# 预下载 tokenizer 词表，保证离线/内网环境也能使用精确 cl100k_base 计数。
+# tiktoken 默认会在首次调用时联网下载；运行期无外网时会静默降级为字符估算。
+ENV TIKTOKEN_CACHE_DIR=/opt/tiktoken
+RUN mkdir -p /opt/tiktoken && \
+    python -c "import tiktoken; tiktoken.get_encoding('cl100k_base')"
+
 # ============ 阶段二：运行镜像 ============
 FROM python:3.12-slim
 
@@ -47,6 +53,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # 从 builder 复制已装好的 Python 包
 COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
+COPY --from=builder /opt/tiktoken /opt/tiktoken
+ENV TIKTOKEN_CACHE_DIR=/opt/tiktoken
 
 COPY app/ ./app/
 # 运维脚本（Milvus 拓扑初始化 / 数据清除 / 重建索引）。

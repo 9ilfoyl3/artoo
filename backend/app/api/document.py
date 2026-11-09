@@ -4,7 +4,6 @@ import asyncio
 import logging
 import os
 import uuid
-from functools import lru_cache
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, UploadFile, File
@@ -1817,9 +1816,12 @@ class MaterialTokenEstimateResponse(BaseModel):
 _MATERIAL_TOKEN_ENCODING = "cl100k_base"
 
 
-@lru_cache(maxsize=1)
 def _get_material_token_estimator():
-    """Lazily create the shared tiktoken estimator used by the materials API."""
+    """Create an estimator so a transient tokenizer load failure can retry.
+
+    ``tiktoken.get_encoding`` already caches the loaded encoder, so creating the
+    lightweight wrapper per request does not reload the vocabulary.
+    """
     from app.agent.memory.token_estimator import TokenEstimator
 
     return TokenEstimator()
@@ -1828,23 +1830,25 @@ def _get_material_token_estimator():
 async def _record_material_text(
     parts: list[str],
     estimator,
-) -> tuple[int, int]:
+) -> tuple[int, int, bool]:
     """Estimate one document from its ordered parent chunks."""
     text = "\n\n".join(parts)
-    token_count = await asyncio.to_thread(estimator.estimate_string, text)
-    return len(text), int(token_count)
+    token_count, used_fallback = await asyncio.to_thread(
+        estimator.estimate_string_with_fallback, text
+    )
+    return len(text), int(token_count), bool(used_fallback)
 
 
 async def _estimate_material_lengths(
     db: AsyncSession,
     docs: list[Document],
-) -> dict[str, tuple[int, int]]:
-    """Return ``{doc_id: (characters, tokens)}`` without materializing the whole KB."""
-    stats = {doc.id: (0, 0) for doc in docs}
+    estimator,
+) -> dict[str, tuple[int, int, bool]]:
+    """Return per-document lengths without materializing the whole KB."""
+    stats = {doc.id: (0, 0, False) for doc in docs}
     if not docs:
         return stats
 
-    estimator = _get_material_token_estimator()
     result = await db.stream(
         select(Chunk.doc_id, Chunk.content)
         .where(
@@ -2005,7 +2009,8 @@ async def estimate_material_tokens(
         scope = "files"
         knowledge_base_id = None
 
-    stats = await _estimate_material_lengths(db, docs)
+    estimator = _get_material_token_estimator()
+    stats = await _estimate_material_lengths(db, docs, estimator)
     files = [
         MaterialTokenEstimateFile(
             file_id=doc.id,
@@ -2028,7 +2033,10 @@ async def estimate_material_tokens(
             total_characters=sum(item.character_count for item in files),
             total_tokens=sum(item.token_count for item in files),
             encoding=_MATERIAL_TOKEN_ENCODING,
-            fallback=bool(estimator.is_fallback),
+            fallback=bool(
+                estimator.is_fallback
+                or any(stats[doc.id][2] for doc in docs)
+            ),
             files=files,
         )
     )

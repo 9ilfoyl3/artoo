@@ -34,6 +34,16 @@ class _CharEstimator:
     def estimate_string(self, text: str) -> int:
         return len(text)
 
+    def estimate_string_with_fallback(self, text: str) -> tuple[int, bool]:
+        return len(text), False
+
+
+class _FallbackEstimator(_CharEstimator):
+    """Deterministic estimator that reports a per-document fallback."""
+
+    def estimate_string_with_fallback(self, text: str) -> tuple[int, bool]:
+        return len(text), True
+
 
 def _identity(user_id: str = "owner-1") -> IdentityContext:
     return IdentityContext(
@@ -194,6 +204,29 @@ async def test_estimate_selected_file_ids_preserves_order_and_deduplicates(
         assert result.total_characters == 12
         assert result.total_tokens == 12
         assert [item.file_id for item in result.files] == ["doc-2", "doc-1"]
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_estimate_reports_per_document_fallback(monkeypatch):
+    engine, session_factory = await _make_session()
+    monkeypatch.setattr(
+        document_api,
+        "_get_material_token_estimator",
+        lambda: _FallbackEstimator(),
+    )
+    try:
+        async with session_factory() as session:
+            response = await document_api.estimate_material_tokens(
+                request=document_api.MaterialTokenEstimateRequest(
+                    file_ids=["doc-1"]
+                ),
+                identity=_identity(),
+                db=session,
+            )
+
+        assert response.result.fallback is True
     finally:
         await engine.dispose()
 
