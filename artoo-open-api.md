@@ -565,7 +565,7 @@ curl -X POST $BASE/api/materials/token-estimate \
 ```
 
 - 估算口径：使用与 4.11 相同的**父块文本**（按 `chunk_index` 排序、以 `\n\n` 拼接），不重复计入子块；`character_count` 是解析后文本的 Python 字符数，`token_count` 使用 `tiktoken` 的 `cl100k_base` 编码。
-- `fallback=true` 表示当前进程未能加载 `tiktoken`，服务已降级为粗略字符估算；调用方仍可展示结果，但应把它视为近似值。
+- `fallback=true` 表示本次请求至少一份文本未能使用 `cl100k_base` BPE 计数（词表加载失败或编码异常），已降级为中英文区分的字符启发式估算；调用方仍可展示结果，但应把它视为近似值。
 - 未完成解析的文档会以 `status` 原样返回且长度为 0。只读身份不会看到不属于其文档列表可见范围的非 `completed` 文档。
 - 鉴权：允许 JWT、API Key、代理 Key 与 AK/SK 通道；请求中的每个知识库或文件都必须具备读权限，任一不存在 / 无权限统一 `404`（存在性非泄露）。
 - 代理 Key 调用时必须同时带 `X-External-User-Id`。
