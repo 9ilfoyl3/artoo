@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Awaitable, Callable
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 
 from app.config import get_settings
 from app.models.manager import ModelManager
@@ -32,8 +32,10 @@ import app.pipeline.chunkers  # noqa: F401 — 确保所有 Chunker 注册到 Fa
 from app.pipeline.embedder import PipelineEmbedder
 from app.pipeline.enricher import Enricher
 from app.pipeline.cleaner import (
+    POSTGRES_UNSAFE_NUL,
     TextCleaner,
     looks_like_fragmented_alnum_text,
+    sanitize_text_for_storage,
     strip_data_uris,
 )
 from app.pipeline.loader import EmbeddedImage, LoadResult, get_loader
@@ -516,6 +518,23 @@ class DocumentPipeline:
                         source_kind, source_id, _stripped, _before_len,
                     )
 
+            # U+0000 可以由 PDF 隐藏文本层或 OCR/Office 转换器产生。必须在 chunk
+            # 与 embedding 之前清理：PostgreSQL 的 text/json 参数不接受该字符，
+            # 而 Embedding/Milvus 通常不会报错，导致故障直到 Chunk 落库才暴露。
+            if final_content:
+                nul_count = final_content.count(POSTGRES_UNSAFE_NUL)
+                if nul_count:
+                    logger.warning(
+                        "[%s=%s] 文档文本包含 %d 个 NUL 字符，已在 chunk 前移除",
+                        source_kind, source_id, nul_count,
+                    )
+                final_content = sanitize_text_for_storage(final_content)
+            if load_result.page_texts:
+                load_result.page_texts = [
+                    sanitize_text_for_storage(page_text)
+                    for page_text in load_result.page_texts
+                ]
+
             # OCR / 转写 / 清洗全部走完仍无内容：空文档是合法输入，不应进入失败重试
             # 或写入占位 chunk。直接返回零 chunk 产物，让上层以 completed + chunk_count=0
             # 表示“处理成功但无可检索内容”。
@@ -579,6 +598,45 @@ class DocumentPipeline:
                 overlap=guard_cfg.chunk_overlap,
             )
 
+            # 再兜底一次：pre_chunked loader 不会经过 final_content→chunker 路径，
+            # enrichment 也可能重新引入控制字符。这里统一覆盖父块、子块和面包屑
+            # 标题，保证后续 metadata、embedding、Milvus 与 PostgreSQL 一致。
+            chunk_nul_count = (
+                sum(
+                    text.count(POSTGRES_UNSAFE_NUL)
+                    for text in chunk_result.parent_chunks
+                )
+                + sum(
+                    text.count(POSTGRES_UNSAFE_NUL)
+                    for text in chunk_result.child_chunks
+                )
+                + sum(
+                    text.count(POSTGRES_UNSAFE_NUL)
+                    for text in chunk_result.context_headers
+                )
+            )
+            if chunk_nul_count:
+                logger.warning(
+                    "[%s=%s] chunk 结果包含 %d 个 NUL 字符，已统一移除",
+                    source_kind, source_id, chunk_nul_count,
+                )
+                chunk_result = replace(
+                    chunk_result,
+                    parent_chunks=[
+                        sanitize_text_for_storage(text)
+                        for text in chunk_result.parent_chunks
+                    ],
+                    child_chunks=[
+                        sanitize_text_for_storage(text)
+                        for text in chunk_result.child_chunks
+                    ],
+                    parent_child_map=chunk_result.parent_child_map,
+                    context_headers=[
+                        sanitize_text_for_storage(text)
+                        for text in chunk_result.context_headers
+                    ],
+                )
+
             child_count = len(chunk_result.child_chunks)
             if child_count > self._CHUNK_COUNT_WARN_THRESHOLD:
                 logger.warning(
@@ -603,6 +661,17 @@ class DocumentPipeline:
 
             # Enrich（当前 pass-through）
             enriched_children = await self.enricher.enrich(chunk_result.child_chunks)
+            enriched_nul_count = sum(
+                text.count(POSTGRES_UNSAFE_NUL) for text in enriched_children
+            )
+            if enriched_nul_count:
+                logger.warning(
+                    "[%s=%s] enrichment 结果包含 %d 个 NUL 字符，已移除",
+                    source_kind, source_id, enriched_nul_count,
+                )
+                enriched_children = [
+                    sanitize_text_for_storage(text) for text in enriched_children
+                ]
 
             # ─── 4. Embed ───
             extractor = MetadataExtractor()
@@ -854,7 +923,7 @@ class DocumentPipeline:
                         doc_id=doc_id,
                         kb_id=kb_id,
                         parent_id=None,
-                        content=content,
+                        content=sanitize_text_for_storage(content),
                         chunk_index=idx,
                         tenant_id=kb_tenant_id,
                     )
@@ -877,7 +946,7 @@ class DocumentPipeline:
                         doc_id=doc_id,
                         kb_id=kb_id,
                         parent_id=parent_id,
-                        content=child_text,
+                        content=sanitize_text_for_storage(child_text),
                         chunk_index=child_idx,
                         chunk_metadata=chunk_metadata_dict,
                         tenant_id=kb_tenant_id,
@@ -890,7 +959,11 @@ class DocumentPipeline:
                         # BM25 content 增强：加文件名前缀，帮助 BM25 和 Rerank 区分同结构文档
                         # Dense embedding 不受影响（使用原始 content 生成向量）
                         "content": self._truncate_utf8(
-                            f"[{doc_title}] {child_text}" if doc_title else child_text,
+                            (
+                                f"[{doc_title}] {sanitize_text_for_storage(child_text)}"
+                                if doc_title
+                                else sanitize_text_for_storage(child_text)
+                            ),
                             60000,
                         ),
                         "dense_vector": embed_result.dense_vectors[child_idx],
