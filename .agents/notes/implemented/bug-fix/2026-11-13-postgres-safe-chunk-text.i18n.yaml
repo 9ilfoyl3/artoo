@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record: the Git blob hash of each side as of the
+# last confirmed-consistent state. Both languages carry equal authority; after
+# editing either side, bring the other along and re-record both hashes with:
+#   git hash-object .agents/notes/implemented/bug-fix/2026-11-13-postgres-safe-chunk-text.md .agents/notes/implemented/bug-fix/2026-11-13-postgres-safe-chunk-text.zh.md
+2026-11-13-postgres-safe-chunk-text.md: cb887d5926b0c873fddd5719fd937a62d96df3c2
+2026-11-13-postgres-safe-chunk-text.zh.md: d0d504ca42724dfbc78e58afdf1513c1f1debe1e

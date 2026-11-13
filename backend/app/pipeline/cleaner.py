@@ -22,6 +22,12 @@ logger = logging.getLogger(__name__)
 # 同时不破坏所在 HTML 表格 / Markdown 段落的结构。
 IMAGE_PLACEHOLDER = "[图片]"
 
+# PostgreSQL 的 UTF-8 text/json 参数拒绝 U+0000（线上表现为 asyncpg 的
+# ``CharacterNotInRepertoireError: invalid byte sequence ... 0x00``）。
+# NUL 可能来自 PDF 隐藏文本层、OCR/Office 转换器或 loader 输出，属于存储层
+# 必须清理的数据卫生问题，而不是可由知识库开关关闭的清洗偏好。
+POSTGRES_UNSAFE_NUL = "\x00"
+
 # 1) HTML img 标签内含 data URI。MinerU 的 md_content 里 HTML 属性引号常被转义
 # 为 \"，故不去匹配引号，改用 [^>]*? 宽松吃掉整个标签。base64 字符集
 # （A-Za-z0-9+/= 及 URL-safe 的 -_）不含 '>'，不会越过标签边界。
@@ -62,6 +68,25 @@ def strip_data_uris(text: str) -> str:
     result = _MD_IMG_DATA_URI_RE.sub(IMAGE_PLACEHOLDER, result)
     result = _BARE_DATA_URI_RE.sub(IMAGE_PLACEHOLDER, result)
     return result
+
+
+def sanitize_text_for_storage(text: str) -> str:
+    """移除 PostgreSQL text/json 无法接收的 NUL 字符。
+
+    Python 字符串可以包含 U+0000，Embedding/Milvus 通常也能接收，但 PostgreSQL
+    的 UTF-8 ``text`` 与 ``json`` 参数会直接拒绝该字符。该清理放在所有内容来源
+    （loader / OCR / ASR / enrichment）汇合后的存储边界，避免某个上游格式再次把
+    非法字符带入 Chunk 表。
+
+    Args:
+        text: 待写入持久化层的文本。
+
+    Returns:
+        不含 NUL 的文本；换行、制表符和其他正常字符保持不变。
+    """
+    if not text or POSTGRES_UNSAFE_NUL not in text:
+        return text
+    return text.replace(POSTGRES_UNSAFE_NUL, "")
 
 
 # 页码正则模式
