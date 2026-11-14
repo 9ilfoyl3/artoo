@@ -2,17 +2,17 @@
 
 作为三层递进式上下文管理的中间层（介于 Token 估算与分组截断压缩之间）：当上下文
 token 数超过 max_context_tokens * threshold（默认 50%）时，用 LLM 将早期历史消息摘要
-为一条 [Memory Summary] system 消息，在保留关键信息的同时大幅减少 token 占用。
+为一段 [Memory Summary] 文本并合并进首条 system 消息，在保留关键信息的同时大幅减少
+token 占用。
 
 合并后的消息列表结构为：
-    [system_msg, summary_msg, *kept_history, *tail]
+    [system_msg_with_summary, *kept_history, *tail]
 
 其中：
-1. system_msg：原始 system prompt（messages[0]），始终保留。
-2. summary_msg：LLM 对早期历史的摘要，封装为一条 system 消息。
-3. kept_history：从 history 尾部按 token budget 保留的最近若干条历史，
+1. system_msg_with_summary：原始 system prompt（messages[0]）追加早期历史摘要。
+2. kept_history：从 history 尾部按 token budget 保留的最近若干条历史，
    按 tool_call/tool_result 组不拆分。
-4. tail：当前轮（最后一条 user 消息及其后续所有 assistant/tool 消息），
+3. tail：当前轮（最后一条 user 消息及其后续所有 assistant/tool 消息），
    始终完整保留。
 
 LLM 调用使用与 Agent 相同的 LLMProvider.generate（async），temperature=0.3 以
@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from app.agent.memory.message_roles import normalize_system_messages
 from app.agent.memory.token_estimator import TokenEstimator
 from app.models.provider import LLMProvider
 
@@ -75,8 +76,9 @@ CONSOLIDATION_SYSTEM_PROMPT = (
 class MemoryConsolidator:
     """LLM 摘要合并器
 
-    在上下文利用率超过阈值（默认 50%）时，将早期历史消息用 LLM 摘要为一条
-    [Memory Summary] system 消息，保留 system prompt + 摘要 + 最近历史 + 当前轮。
+    在上下文利用率超过阈值（默认 50%）时，将早期历史消息用 LLM 摘要为一段
+    [Memory Summary] 文本并合并进首条 system 消息，保留 system prompt + 摘要 +
+    最近历史 + 当前轮。
 
     LLM 调用复用 Agent 的 LLMProvider 实例（generate 为 async），并通过传入的
     TokenEstimator 计算 token budget 以确定保留边界。
@@ -128,16 +130,16 @@ class MemoryConsolidator:
         return current_tokens > trigger_at
 
     async def consolidate(self, messages: list[dict]) -> list[dict]:
-        """将早期历史消息摘要为一条 system 消息并返回压缩后的消息列表
+        """将早期历史消息摘要合并进首条 system 并返回压缩后的消息列表
 
         分区与保留规则：
-        - system_msg：messages[0]，始终保留。
+        - system_msg：messages[0]，始终保留并承载早期历史摘要。
         - tail：从最后一条 user 消息到列表末尾（当前轮），始终完整保留。
         - history：system 与 tail 之间的中间部分。从尾部按 token budget 计算
           keep_from_end 条保留（_find_keep_boundary，组不拆分），其余早期消息
-          （to_consolidate）用 LLM 摘要为一条 [Memory Summary] system 消息。
+          （to_consolidate）用 LLM 摘要为一段 [Memory Summary] 文本并合并进首条 system。
 
-        最终结构：[system_msg, summary_msg, *to_keep, *tail]。
+        最终结构：[system_msg_with_summary, *to_keep, *tail]。
 
         Args:
             messages: 消息字典列表，messages[0] 约定为 system prompt。
@@ -208,9 +210,13 @@ class MemoryConsolidator:
             ),
         }
 
+        # OpenAI-compatible providers require the system role to appear only at
+        # the beginning. Keep the summary in the existing system prompt rather
+        # than introducing a second system message mid-conversation.
         result: list[dict] = [system_msg, summary_msg]
         result.extend(to_keep)
         result.extend(tail)
+        result = normalize_system_messages(result)
 
         logger.info(
             "[MemoryConsolidator] 摘要合并完成：%d 条早期消息 -> 摘要（%d 字符），"

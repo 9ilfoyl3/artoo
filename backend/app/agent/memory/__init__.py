@@ -2,6 +2,7 @@
 
 from .compress import compress_context
 from .consolidator import MemoryConsolidator
+from .message_roles import normalize_system_messages
 from .context_manager import (
     ContextManager,
     estimate_tokens,
@@ -20,4 +21,5 @@ __all__ = [
     "UsageTracker",
     "compress_context",
     "MemoryConsolidator",
+    "normalize_system_messages",
 ]

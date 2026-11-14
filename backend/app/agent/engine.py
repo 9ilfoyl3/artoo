@@ -27,6 +27,7 @@ from app.agent.json_repair import (
 )
 from app.agent.memory.compress import compress_context, prune_context
 from app.agent.memory.consolidator import MemoryConsolidator
+from app.agent.memory.message_roles import normalize_system_messages
 from app.agent.memory.token_estimator import TokenEstimator
 from app.agent.memory.usage_tracker import UsageTracker
 from app.agent.state import AgentState, AgentStep, ToolCallRecord
@@ -398,6 +399,10 @@ class AgentEngine:
             iteration = state.current_round
             logger.info("[Agent][Round-%d/%d] starting", iteration + 1, self._config.max_iterations)
 
+            # A checkpoint written before the role-normalization fix may restore
+            # a second system message. Repair it before token accounting so the
+            # stale message cannot trigger unnecessary pruning.
+            messages = normalize_system_messages(messages)
             current_tokens = self._usage_tracker.estimate_current_tokens(messages)
             if self._config.context_pruning_enabled:
                 messages, pruned_count = prune_context(
@@ -421,6 +426,10 @@ class AgentEngine:
             messages = compress_context(
                 messages, self._token_estimator, self._config.max_context_tokens, current_tokens,
             )
+            # Repair both fresh consolidation output and older checkpoints that
+            # persisted a second system message. Providers require system to be
+            # the single leading role.
+            messages = normalize_system_messages(messages)
             checkpoint_needed = checkpoint_needed or len(messages) != before_compression
             self._checkpoint_needed = checkpoint_needed
             sent_count = len(messages)
