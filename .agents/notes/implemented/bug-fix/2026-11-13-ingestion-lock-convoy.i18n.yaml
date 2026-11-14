@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record: the Git blob hash of each side as of the
+# last confirmed-consistent state. Both languages carry equal authority; after
+# editing either side, bring the other along and re-record both hashes with:
+#   git hash-object .agents/notes/implemented/bug-fix/2026-11-13-ingestion-lock-convoy.md .agents/notes/implemented/bug-fix/2026-11-13-ingestion-lock-convoy.zh.md
+2026-11-13-ingestion-lock-convoy.md: acde083093ad12dd9e60da278c72ebc317e4459b
+2026-11-13-ingestion-lock-convoy.zh.md: 513499de547ea1cb1cde588df71000824ac014d8

@@ -68,7 +68,7 @@ SUPER_ADMIN_PASSWORD=<初始超管密码，如 Admin@xxxxxx>
 bash install.sh
 ```
 
-脚本会自动：加载全部镜像 → 校验 `.env` → 启动中间件（etcd/minio/milvus/postgres/redis，等待 healthy）→ 启动应用（backend/worker/frontend）。
+脚本会自动：加载全部镜像 → 校验 `.env` → 启动中间件（etcd/minio/milvus/postgres/redis，等待 healthy）→ 执行一次性迁移（migrate）→ 启动应用（backend/worker/frontend）。
 
 ### 3. 部署后验证
 
@@ -123,7 +123,7 @@ cp -f /tmp/artoo-update/deploy/reset-knowledge-data.sh deploy/
 bash install.sh update
 ```
 
-脚本会加载新镜像 → 强制重建 backend/worker/frontend 容器 → 自动清理被顶替的旧应用镜像。
+脚本会加载新镜像 → 自动保留当前镜像为 rollback-pre-update 标签 → 停止 Worker/Backend → 执行一次性迁移（migrate）→ 重建 backend/worker/frontend 容器 → 恢复 Worker。旧应用镜像默认保留用于回滚；迁移失败时不会启动新应用。
 
 ### 4. 更新后验证
 
@@ -131,6 +131,7 @@ bash install.sh update
 bash install.sh status
 curl http://127.0.0.1:8000/
 curl -I http://127.0.0.1:8888
+bash install.sh logs migrate 100      # 确认迁移成功退出
 bash install.sh logs backend 100      # 确认无报错后 Ctrl+C 退出
 ```
 

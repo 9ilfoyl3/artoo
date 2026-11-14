@@ -39,12 +39,15 @@ class _EmptyOCRManager:
 
 
 class _FakeMilvus:
-    def __init__(self) -> None:
+    def __init__(self, before_ensure=None) -> None:
         self.ensured: list[tuple[str, int | None, int | None]] = []
         self.inserted: list[dict] = []
         self.deleted_doc_ids: list[str] = []
+        self.before_ensure = before_ensure
 
     async def ensure_collection(self, kb_id: str, **kwargs) -> None:
+        if self.before_ensure is not None:
+            self.before_ensure()
         self.ensured.append(
             (kb_id, kwargs.get("ef_construction"), kwargs.get("m"))
         )
@@ -77,6 +80,27 @@ class _FakePipeline:
 
     async def process_to_vectors(self, _file_path: str, **_kwargs):
         return self._processed
+
+
+class _TrackingSessionFactory:
+    """Expose the current Session without changing its transaction semantics."""
+
+    def __init__(self, factory):
+        self._factory = factory
+        self.current = None
+
+    def __call__(self):
+        return self._session_context()
+
+    @contextlib.asynccontextmanager
+    async def _session_context(self):
+        previous = self.current
+        async with self._factory() as session:
+            self.current = session
+            try:
+                yield session
+            finally:
+                self.current = previous
 
 
 async def _make_session_factory():
@@ -177,14 +201,24 @@ async def test_kb_pipeline_marks_empty_document_completed(monkeypatch):
         )
         await session.commit()
 
-    milvus = _FakeMilvus()
+    tracking_factory = _TrackingSessionFactory(session_factory)
+
+    def _assert_no_transaction() -> None:
+        assert tracking_factory.current is not None
+        assert not tracking_factory.current.in_transaction()
+
+    milvus = _FakeMilvus(before_ensure=_assert_no_transaction)
     pipeline = DocumentPipeline(
         model_manager=object(),
         milvus_client=milvus,
-        db_session_factory=session_factory,
+        db_session_factory=tracking_factory,
     )
 
     async def _return_empty(*_args, **_kwargs):
+        # The session used for processing/filename snapshot has already committed.
+        # No DB transaction may remain open across the long CPU/network phase.
+        assert tracking_factory.current is not None
+        assert not tracking_factory.current.in_transaction()
         return _empty_processed_document()
 
     monkeypatch.setattr(pipeline, "process_to_vectors", _return_empty)

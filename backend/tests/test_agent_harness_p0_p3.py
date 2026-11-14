@@ -14,6 +14,8 @@ from app.agent.harness import (
     dedupe_queries,
 )
 from app.agent.memory.compress import prune_context
+from app.agent.memory.consolidator import MemoryConsolidator
+from app.agent.memory.message_roles import normalize_system_messages
 from app.agent.memory.token_estimator import TokenEstimator
 from app.agent.prompts.progressive_rag import render_system_prompt
 from app.agent.tools.base import BaseTool, ToolResult
@@ -83,6 +85,26 @@ class _RecordingLLM:
     async def stream_with_tools(self, messages, tools, **kwargs):
         self.kwargs = kwargs
         yield StreamChunk(content="final", finish_reason="stop")
+
+
+class _RecordingMessagesLLM:
+    def __init__(self):
+        self.messages_by_call: list[list[dict]] = []
+
+    async def stream_with_tools(self, messages, tools, **kwargs):
+        self.messages_by_call.append([dict(message) for message in messages])
+        yield StreamChunk(content="final", finish_reason="stop")
+
+
+class _SummaryLLM:
+    async def generate(self, messages, **kwargs) -> str:
+        return "earlier conversation summary"
+
+
+class _MessageLengthEstimator:
+    @staticmethod
+    def estimate_message(message: dict) -> int:
+        return max(1, len(str(message.get("content") or "")) // 2)
 
 
 class _MemoryCache:
@@ -280,3 +302,69 @@ def test_session_scoped_retrieval_is_not_cached() -> None:
 
     assert retriever.calls == 2
     assert second[2] is False
+
+
+def test_consolidation_keeps_summary_in_leading_system_message() -> None:
+    consolidator = MemoryConsolidator(
+        llm_provider=_SummaryLLM(),
+        estimator=_MessageLengthEstimator(),
+        max_context_tokens=100,
+    )
+    messages = [
+        {"role": "system", "content": "base system"},
+        {"role": "user", "content": "old question"},
+        {"role": "assistant", "content": "old answer"},
+        {"role": "user", "content": "current question"},
+    ]
+
+    consolidated = asyncio.run(consolidator.consolidate(messages))
+
+    assert [message["role"] for message in consolidated].count("system") == 1
+    assert consolidated[0]["role"] == "system"
+    assert consolidated[0]["content"].startswith("base system\n\n[Memory Summary")
+    assert "earlier conversation summary" in consolidated[0]["content"]
+    assert consolidated[-1] == messages[-1]
+
+
+def test_system_message_normalization_repairs_legacy_checkpoint_history() -> None:
+    messages = [
+        {"role": "system", "content": "base system"},
+        {"role": "system", "content": "[Memory Summary]\nold summary"},
+        {"role": "user", "content": "old question"},
+        {"role": "assistant", "content": "old answer"},
+    ]
+
+    normalized = normalize_system_messages(messages)
+
+    assert normalized == [
+        {
+            "role": "system",
+            "content": "base system\n\n[Memory Summary]\nold summary",
+        },
+        {"role": "user", "content": "old question"},
+        {"role": "assistant", "content": "old answer"},
+    ]
+    assert messages[0]["content"] == "base system"
+
+
+def test_engine_repairs_duplicate_system_history_before_provider_call() -> None:
+    llm = _RecordingMessagesLLM()
+    engine = AgentEngine(
+        AgentConfig(system_prompt="test"),
+        llm,
+        ToolRegistry(),
+        EventBus(),
+    )
+    history = [
+        {"role": "system", "content": "legacy summary"},
+        {"role": "user", "content": "old question"},
+        {"role": "assistant", "content": "old answer"},
+    ]
+
+    asyncio.run(engine.execute("session", "new question", llm_context=history))
+
+    sent = llm.messages_by_call[0]
+    assert [message["role"] for message in sent].count("system") == 1
+    assert sent[0]["role"] == "system"
+    assert "test" in sent[0]["content"]
+    assert "legacy summary" in sent[0]["content"]

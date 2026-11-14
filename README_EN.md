@@ -267,7 +267,7 @@ Manual equivalent (inside `dist/`):
 
 ```bash
 docker compose -f docker-compose.yml --profile infra up -d   # start infra, wait until healthy
-docker compose -f docker-compose.yml --profile app up -d     # start app
+docker compose -f docker-compose.yml --profile app up -d     # run one-shot migrate, then start app
 ```
 
 ## 🔍 Retrieval Modes

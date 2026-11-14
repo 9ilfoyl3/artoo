@@ -22,7 +22,7 @@ from app.pipeline.factory import create_pipeline
 from app.pipeline.queue import TaskQueue
 from app.pipeline.worker import PipelineWorker
 from app.startup import configure_thread_pool, load_embed_configs
-from app.storage.database import async_session, init_db
+from app.storage.database import async_session, init_db, reset_interrupted_tasks
 
 logger = logging.getLogger("worker_main")
 
@@ -51,12 +51,10 @@ async def main():
           f"thread_pool_max_workers={settings.thread_pool_max_workers or 'default'}")
     print("=" * 50)
 
-    # 初始化数据库（确保表存在 + migration）
+    # Verify DB readiness. Production migration runs once in the dedicated
+    # ``app.migrate`` service before this process starts.
     await init_db()
-
-    # 会话文件异步上传新列迁移（progress / progress_message / error_message）
-    from app.startup import _auto_migrate_session_file_columns
-    await _auto_migrate_session_file_columns()
+    await reset_interrupted_tasks()
 
     # 幂等建好 Milvus 的两个物理 collection（Worker 可能先于 API 起来，各自幂等）
     from app.startup import init_milvus_collections

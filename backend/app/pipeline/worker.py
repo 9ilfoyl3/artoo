@@ -128,6 +128,12 @@ class PipelineWorker:
                 await self._reclaim_orphan_tasks()
 
             try:
+                # Never accumulate an unbounded number of tasks that would each
+                # perform a DB status lookup before reaching the processing
+                # semaphore. Keep dispatch itself bounded.
+                await self._wait_for_task_capacity()
+                if not self._running:
+                    break
                 # 快道：常规/小文件，吃满 max_concurrent
                 messages = await self._queue.consume(
                     self._consumer_name, count=1, block_ms=5000
@@ -144,7 +150,11 @@ class PipelineWorker:
                 # 并非不阻塞；队列空时会一直阻塞到 socket_timeout 触发
                 # "Timeout reading from redis"。用 100ms 小正值做近似非阻塞拉取，
                 # 快道的 5s 长轮询已提供主循环节流，这里只需快速探一下慢道。
-                if self._slow_queue is not None and not self._slow_semaphore.locked():
+                if (
+                    self._slow_queue is not None
+                    and not self._slow_semaphore.locked()
+                    and len(self._tasks) < self._max_concurrent
+                ):
                     slow_messages = await self._slow_queue.consume(
                         self._consumer_name, count=1, block_ms=100
                     )
@@ -191,9 +201,15 @@ class PipelineWorker:
         print(f"[Worker] ♻️ 回收 {len(pending)} 个 PEL 孤儿任务重新处理")
         logger.info("Reclaimed %d orphan task(s) from PEL", len(pending))
         for message_id, msg in pending:
+            await self._wait_for_task_capacity()
             task = asyncio.create_task(self._process_task(message_id, msg, queue=queue))
             self._tasks.add(task)
             task.add_done_callback(self._tasks.discard)
+
+    async def _wait_for_task_capacity(self) -> None:
+        """Backpressure the queue consumer before creating another DB-touching task."""
+        while self._running and len(self._tasks) >= self._max_concurrent:
+            await asyncio.sleep(0.05)
 
     async def _on_poison_pill(self, msg: TaskMessage, reason: str) -> None:
         """毒消息被移入 DLQ 后的回调：将对应文档标记为 failed
@@ -273,6 +289,33 @@ class PipelineWorker:
         queue = queue or self._queue
         is_slow = self._slow_queue is not None and queue is self._slow_queue
 
+        # Slow tasks take their dedicated lane slot first, then both lanes compete
+        # for the global processing semaphore. All DB work stays inside the slot.
+        if is_slow:
+            async with self._slow_semaphore:
+                await self._process_task_admitted(message_id, msg, queue, is_slow)
+        else:
+            await self._process_task_admitted(message_id, msg, queue, is_slow)
+
+    async def _process_task_admitted(
+        self,
+        message_id: str,
+        msg: TaskMessage,
+        queue: TaskQueue,
+        is_slow: bool,
+    ) -> None:
+        """Run one task only after acquiring a processing slot."""
+        async with self.semaphore:
+            await self._process_task_in_slot(message_id, msg, queue, is_slow)
+
+    async def _process_task_in_slot(
+        self,
+        message_id: str,
+        msg: TaskMessage,
+        queue: TaskQueue,
+        is_slow: bool,
+    ) -> None:
+        """Perform the idempotency lookup and pipeline execution in a bounded slot."""
         # 幂等检查：文档已完成则跳过
         if await self._is_document_completed(msg.doc_id):
             print(f"[Worker] 文档 {msg.doc_id} 已完成/取消/删除，跳过")
@@ -289,12 +332,7 @@ class PipelineWorker:
             msg.doc_id, "slow" if is_slow else "fast", msg.retry_count, msg.trace_id,
         )
 
-        # 慢道任务先占用慢道额度，确保快道始终有剩余准入额度（防止大文件占满）。
-        if is_slow:
-            async with self._slow_semaphore:
-                await self._run_pipeline_guarded(message_id, msg, queue)
-        else:
-            await self._run_pipeline_guarded(message_id, msg, queue)
+        await self._run_pipeline_guarded(message_id, msg, queue)
 
     async def _run_pipeline_guarded(
         self, message_id: str, msg: TaskMessage, queue: "TaskQueue"
@@ -305,46 +343,44 @@ class PipelineWorker:
         （成功/失败/超时）删除临时文件。object_key 为空时回退用 msg.file_path
         （兼容历史消息与对象存储不可用的降级路径）。
         """
-        # 通过 semaphore 控制并发
-        async with self.semaphore:
-            try:
-                async with self._resolve_file(msg) as file_path:
-                    # 单个文档处理总超时
-                    await asyncio.wait_for(
-                        self._pipeline.process(
-                            file_path=file_path,
-                            doc_id=msg.doc_id,
-                            kb_id=msg.kb_id,
-                        ),
-                        timeout=self._task_timeout,
-                    )
-                # 处理成功，ACK 消息，重置熔断计数
-                await queue.ack(message_id)
-                self._consecutive_failures = 0
-                print(f"[Worker] ✅ 文档 {msg.doc_id} 处理完成")
-                logger.info(
-                    "Task completed: doc_id=%s (trace_id=%s)",
-                    msg.doc_id, msg.trace_id,
+        try:
+            async with self._resolve_file(msg) as file_path:
+                # 单个文档处理总超时
+                await asyncio.wait_for(
+                    self._pipeline.process(
+                        file_path=file_path,
+                        doc_id=msg.doc_id,
+                        kb_id=msg.kb_id,
+                    ),
+                    timeout=self._task_timeout,
                 )
-            except asyncio.TimeoutError:
-                error_msg = f"处理超时（超过 {self._task_timeout // 60} 分钟）"
-                print(f"[Worker] ⏰ 文档 {msg.doc_id} {error_msg}")
-                logger.error(
-                    "Task timeout for doc_id=%s (trace_id=%s): %s",
-                    msg.doc_id, msg.trace_id, error_msg,
-                )
-                # 超时直接标记失败，不重试
-                await self._mark_failed(msg.doc_id, error_msg)
-                await queue.ack(message_id)
-                self._record_failure()
-            except Exception as e:
-                print(f"[Worker] ❌ 文档 {msg.doc_id} 处理失败: {type(e).__name__}: {e}")
-                logger.error(
-                    "Task failed: doc_id=%s, error=%s (trace_id=%s)",
-                    msg.doc_id, e, msg.trace_id,
-                )
-                self._record_failure()
-                await self._handle_failure(message_id, msg, e, queue=queue)
+            # 处理成功，ACK 消息，重置熔断计数
+            await queue.ack(message_id)
+            self._consecutive_failures = 0
+            print(f"[Worker] ✅ 文档 {msg.doc_id} 处理完成")
+            logger.info(
+                "Task completed: doc_id=%s (trace_id=%s)",
+                msg.doc_id, msg.trace_id,
+            )
+        except asyncio.TimeoutError:
+            error_msg = f"处理超时（超过 {self._task_timeout // 60} 分钟）"
+            print(f"[Worker] ⏰ 文档 {msg.doc_id} {error_msg}")
+            logger.error(
+                "Task timeout for doc_id=%s (trace_id=%s): %s",
+                msg.doc_id, msg.trace_id, error_msg,
+            )
+            # 超时直接标记失败，不重试
+            await self._mark_failed(msg.doc_id, error_msg)
+            await queue.ack(message_id)
+            self._record_failure()
+        except Exception as e:
+            print(f"[Worker] ❌ 文档 {msg.doc_id} 处理失败: {type(e).__name__}: {e}")
+            logger.error(
+                "Task failed: doc_id=%s, error=%s (trace_id=%s)",
+                msg.doc_id, e, msg.trace_id,
+            )
+            self._record_failure()
+            await self._handle_failure(message_id, msg, e, queue=queue)
 
     def _resolve_file(self, msg: TaskMessage):
         """返回一个 async context manager，产出可供 pipeline 处理的本地文件路径。
