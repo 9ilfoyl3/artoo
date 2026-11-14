@@ -133,13 +133,13 @@ bash install.sh  # 重新执行部署
 | `bash install.sh down` | 停止并删除容器（**数据卷保留**） |
 | `bash install.sh down-all` | 停止并删除容器 + 数据卷（⚠️ **清除所有数据**，需二次确认） |
 
-可用服务名：`backend` / `worker` / `frontend` / `postgres` / `milvus` / `redis` / `etcd` / `minio` / `neo4j`
+可用服务名：`migrate` / `backend` / `worker` / `frontend` / `postgres` / `milvus` / `redis` / `etcd` / `minio` / `neo4j`
 
 示例：
 
 ```bash
 bash install.sh logs backend 200     # 看后端最近 200 条日志
-bash install.sh restart backend      # 单独重启后端
+bash install.sh restart backend      # 先停 Worker、执行迁移、重启后端、再恢复 Worker
 bash install.sh status               # 查看服务健康状态
 ```
 
@@ -157,9 +157,14 @@ bash install.sh update            # 更新全部应用
 bash install.sh update backend    # 只更新后端
 ```
 
-`update` 会加载新镜像 → 强制重建应用容器 → 自动清理被顶替的旧镜像。中间件不受影响，数据完整保留。
+`update` 会加载新镜像 → 停止 Worker → 执行一次性数据库迁移 → 重建应用容器 →
+恢复 Worker，并默认保留被顶替的旧镜像。迁移失败时不会启动新 Backend/Worker。
+中间件不受影响，数据完整保留。
 
-> 更新只动 `backend/worker/frontend`，不重建中间件，无数据丢失风险。
+更新前会自动为当前 backend/frontend 打 `rollback-pre-update-<时间>` 标签，旧镜像默认保留用于回滚；磁盘空间紧张时显式执行
+`CLEAN_OLD_IMAGES=1 bash install.sh update` 才会清理被顶替的镜像。
+
+> 更新只动 `migrate/backend/worker/frontend`（`migrate` 复用 backend 镜像），不重建中间件，无数据丢失风险。
 
 ---
 
@@ -222,7 +227,8 @@ NEO4J_PASSWORD=<自定义强密码>
 | --- | --- |
 | 脚本报「未找到 Docker Compose」 | 服务器未装 Docker Compose，先安装 |
 | 部分中间件未就绪 | `docker ps --filter name=arag-` 查看容器状态；Milvus 依赖 etcd/minio healthy 才启动，耐心等待 |
-| 应用启动失败 | `bash install.sh logs backend` 看后端日志，多为 `.env` 必填项缺失或数据库未就绪 |
+| 应用启动失败 | 先看 `bash install.sh logs migrate`，再看 backend；迁移失败时 Backend/Worker 不会启动 |
+| 启动卡在数据库迁移 | 检查是否有 Worker 长事务；新版迁移有 5 秒 `lock_timeout`，会快速失败而不是无限等待 |
 | 前端能开、问答报错 | 检查前端「模型管理」是否已配置 LLM / Embedding / Rerank 服务地址 |
 | 改了 `config.js` 不生效 | 该文件挂载覆盖，改完刷新浏览器即可，无需重建 |
 | 架构不匹配无法启动 | 确认离线包架构与服务器 CPU 架构一致（amd64 / arm64） |
@@ -235,6 +241,7 @@ NEO4J_PASSWORD=<自定义强密码>
 
 ```bash
 docker compose -f docker-compose.yml up -d etcd minio milvus postgres redis   # 起中间件，等 healthy
+docker compose -f docker-compose.yml up -d migrate                            # 一次性迁移，必须成功退出
 docker compose -f docker-compose.yml up -d backend worker frontend            # 起应用
 ```
 

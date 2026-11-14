@@ -286,7 +286,7 @@ cd dist && ./install.sh     # 加载镜像 → 引导填 .env → 起中间件(i
 
 ```bash
 docker compose -f docker-compose.yml --profile infra up -d   # 起中间件，等 healthy
-docker compose -f docker-compose.yml --profile app up -d     # 起应用
+docker compose -f docker-compose.yml --profile app up -d     # 先运行一次性 migrate，再起应用
 ```
 
 > **可选：部署时启用知识图谱。** 打包时加 `--with-graph`，应用镜像内会装 Neo4j 驱动、离线包额外导出 Neo4j 镜像：

@@ -55,13 +55,6 @@ async def lifespan(app: FastAPI):
 
     await init_db()
 
-    # 自动迁移：添加可能缺失的新列
-    await _auto_migrate_columns()
-
-    # 会话文件异步上传新列迁移（progress / progress_message / error_message）
-    from app.startup import _auto_migrate_session_file_columns
-    await _auto_migrate_session_file_columns()
-
     # 初始化对象存储 bucket（知识库源文件权威存储）
     await _init_object_store()
 
@@ -177,34 +170,6 @@ async def lifespan(app: FastAPI):
 
     # 关闭会话文件异步上传基础设施（停订阅循环、关队列连接、清理单例）
     await _close_session_upload_infra(app)
-
-
-async def _auto_migrate_columns() -> None:
-    """自动添加可能缺失的数据库列（轻量级迁移）"""
-    from sqlalchemy import text
-
-    migrations = [
-        # chat_messages.agent_steps (JSON, nullable) - 存储 Agent 思考步骤
-        ("chat_messages", "agent_steps", "ALTER TABLE chat_messages ADD COLUMN agent_steps JSON"),
-        # agent_presets 表（如果不存在则由 init_db 的 create_all 创建）
-    ]
-
-    async with async_session() as session:
-        for table, column, sql in migrations:
-            try:
-                # 检查列是否已存在
-                check_sql = text(
-                    "SELECT column_name FROM information_schema.columns "
-                    "WHERE table_name = :table AND column_name = :column"
-                )
-                result = await session.execute(check_sql, {"table": table, "column": column})
-                if result.scalar() is None:
-                    await session.execute(text(sql))
-                    await session.commit()
-                    logger.info("自动迁移：添加列 %s.%s", table, column)
-            except Exception as e:
-                logger.debug("迁移检查跳过 %s.%s: %s", table, column, e)
-                await session.rollback()
 
 
 async def _init_task_queue(app: FastAPI) -> None:

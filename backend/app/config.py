@@ -17,6 +17,16 @@ class Settings(BaseSettings):
     # （中间件已设 200）。按服务器内存与并发上调，但别超过 PG 上限。
     db_pool_size: int = 10
     db_max_overflow: int = 20
+    # 从连接池获取连接的最长等待时间。锁等待期间应快速失败，避免请求无限堆积。
+    db_pool_timeout_seconds: float = 10.0
+    # 连接生命周期上限，避免长期运行后使用被中间网络设备回收的 stale connection。
+    db_pool_recycle_seconds: int = 1800
+
+    # 启动迁移。开发/手工启动默认自动执行；生产 Compose 由独立 migrate 服务执行，
+    # backend/worker 启动时只验证数据库可达，避免多个 uvicorn worker 并行 DDL。
+    auto_migrate_on_startup: bool = True
+    migration_lock_timeout_seconds: float = 5.0
+    migration_statement_timeout_seconds: float = 300.0
 
     # 线程池（asyncio.to_thread 的默认 executor）。承载同步阻塞调用：
     # 文档解析/切片、pymilvus 同步检索、bcrypt 口令哈希等。

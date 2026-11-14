@@ -847,6 +847,13 @@ class DocumentPipeline:
                     select(KnowledgeBase.tenant_id).where(KnowledgeBase.id == kb_id)
                 )
                 kb_tenant_id = kb_tenant_result.scalar_one_or_none()
+                # Snapshot the filename in the same short transaction. The long
+                # OCR/Embedding/Milvus phase below must not start a DB transaction.
+                doc_result = await session.execute(
+                    select(Document.filename).where(Document.id == doc_id)
+                )
+                doc_filename = doc_result.scalar_one_or_none() or ""
+                await session.commit()
                 limits = await get_upload_limit_resolver().resolve(kb_tenant_id)
 
                 # ─── 1–4. Load → OCR → Clean → Chunk → Pre_Embed_Gate → Embed ───
@@ -902,32 +909,30 @@ class DocumentPipeline:
                     f"父块: {len(chunk_result.parent_chunks)}，子块: {len(enriched_children)}"
                 )
 
-                # 获取文档文件名，用于 BM25 content 前缀增强
-                doc_result = await session.execute(
-                    select(Document.filename).where(Document.id == doc_id)
-                )
-                doc_filename = doc_result.scalar_one_or_none() or ""
                 # 去掉文件扩展名，只保留文档名称
                 doc_title = Path(doc_filename).stem if doc_filename else ""
 
                 parent_ids: list[str] = [
                     str(uuid.uuid4()) for _ in range(len(chunk_result.parent_chunks))
                 ]
+                parent_chunks: list[Chunk] = []
+                child_chunks: list[Chunk] = []
 
                 # 写入父 chunk 到 SQLite
                 for idx, (pid, content) in enumerate(
                     zip(parent_ids, chunk_result.parent_chunks)
                 ):
-                    parent_chunk = Chunk(
-                        id=pid,
-                        doc_id=doc_id,
-                        kb_id=kb_id,
-                        parent_id=None,
-                        content=sanitize_text_for_storage(content),
-                        chunk_index=idx,
-                        tenant_id=kb_tenant_id,
+                    parent_chunks.append(
+                        Chunk(
+                            id=pid,
+                            doc_id=doc_id,
+                            kb_id=kb_id,
+                            parent_id=None,
+                            content=sanitize_text_for_storage(content),
+                            chunk_index=idx,
+                            tenant_id=kb_tenant_id,
+                        )
                     )
-                    session.add(parent_chunk)
 
                 # 写入子 chunk 到 SQLite + Milvus
                 milvus_data: list[dict] = []
@@ -941,17 +946,18 @@ class DocumentPipeline:
                     meta = metadata_list[child_idx]
                     chunk_metadata_dict = asdict(meta)
 
-                    child_chunk = Chunk(
-                        id=child_id,
-                        doc_id=doc_id,
-                        kb_id=kb_id,
-                        parent_id=parent_id,
-                        content=sanitize_text_for_storage(child_text),
-                        chunk_index=child_idx,
-                        chunk_metadata=chunk_metadata_dict,
-                        tenant_id=kb_tenant_id,
+                    child_chunks.append(
+                        Chunk(
+                            id=child_id,
+                            doc_id=doc_id,
+                            kb_id=kb_id,
+                            parent_id=parent_id,
+                            content=sanitize_text_for_storage(child_text),
+                            chunk_index=child_idx,
+                            chunk_metadata=chunk_metadata_dict,
+                            tenant_id=kb_tenant_id,
+                        )
                     )
-                    session.add(child_chunk)
 
                     milvus_data.append({
                         "chunk_id": child_id,
@@ -1030,6 +1036,8 @@ class DocumentPipeline:
                 )
 
                 # ─── 完成 ───
+                session.add_all(parent_chunks)
+                session.add_all(child_chunks)
                 await self._update_status(session, doc_id, "completed", chunk_count=child_count)
                 await session.commit()
                 await tracker.complete()

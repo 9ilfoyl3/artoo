@@ -19,14 +19,15 @@
 #   bash install.sh logs [服务名] [条数]  # 查看日志（默认全部应用，100条）
 #   bash install.sh status       # 查看服务状态
 #
-# 服务名: backend / worker / frontend / postgres / milvus / redis / etcd / minio / neo4j
+# 服务名: migrate / backend / worker / frontend / postgres / milvus / redis / etcd / minio / neo4j
 # ============================================================
 set -euo pipefail
 
 cd "$(dirname "$0")"
 
-# 自动授权：Windows 打包会丢失 Linux 执行权限，这里统一补回（含本脚本所在目录）
-chmod -R 755 . 2>/dev/null || true
+# 只补脚本执行位，不能用 chmod -R 755：那会让 .env 中的密码/密钥对所有人可读。
+find . -maxdepth 1 -type f -name '*.sh' -exec chmod 755 {} + 2>/dev/null || true
+[[ -f .env ]] && chmod 600 .env 2>/dev/null || true
 
 COMPOSE_FILE="docker-compose.yml"
 ACTION="${1:-install}"
@@ -49,6 +50,9 @@ fi
 # 图谱开启时 neo4j 会被追加进中间件清单（见 resolve_infra_services）。
 INFRA_SERVICES="etcd minio milvus postgres redis"
 APP_SERVICES="backend worker frontend"
+MIGRATE_SERVICE="migrate"
+BACKEND_IMAGE="artoo-backend:latest"
+FRONTEND_IMAGE="artoo-frontend:latest"
 
 # ============================================================
 # 公共函数
@@ -160,6 +164,27 @@ wait_infra_healthy() {
   echo "  ⚠️ 部分中间件可能未就绪，请检查: docker ps --filter name=arag-"
 }
 
+# 在启动/重建 backend 或 worker 前执行一次性迁移。迁移服务带 advisory lock 和
+# lock_timeout，不会让多个 uvicorn worker 并行 DDL 或无限等待 Worker 长事务。
+run_migrations() {
+  echo "=== 执行数据库迁移 ==="
+  $COMPOSE_CMD -f "$COMPOSE_FILE" up -d --force-recreate "$MIGRATE_SERVICE"
+  local container_id
+  container_id=$($COMPOSE_CMD -f "$COMPOSE_FILE" ps -q "$MIGRATE_SERVICE")
+  if [[ -z "$container_id" ]]; then
+    echo "✗ 无法获取迁移容器 ID" >&2
+    exit 1
+  fi
+  local exit_code
+  exit_code=$(docker wait "$container_id")
+  if [[ "$exit_code" != "0" ]]; then
+    echo "✗ 数据库迁移失败（exit=$exit_code），应用不会启动。" >&2
+    $COMPOSE_CMD -f "$COMPOSE_FILE" logs --tail=200 "$MIGRATE_SERVICE" >&2 || true
+    exit 1
+  fi
+  echo "  ✓ 数据库迁移完成"
+}
+
 show_info() {
   local FRONTEND_PORT BACKEND_PORT IP
   FRONTEND_PORT=$(grep -E '^FRONTEND_PORT=' .env | cut -d= -f2 || true)
@@ -172,6 +197,7 @@ show_info() {
   echo "  常用命令（在本目录执行，末尾可加服务名指定单个服务）："
   echo "    查看状态: bash install.sh status"
   echo "    查看日志: bash install.sh logs [服务名] [条数]"
+  echo "    迁移日志: bash install.sh logs migrate 200"
   echo "    重启应用: bash install.sh restart [服务名]   # 仅重启，不重建"
   echo "    更新应用: bash install.sh update [服务名]    # 替换 app-images.tar 后执行"
   echo "    停止服务: bash install.sh stop [服务名]"
@@ -204,6 +230,7 @@ do_install() {
   wait_infra_healthy
 
   echo "[5/5] 启动应用..."
+  run_migrations
   $COMPOSE_CMD -f "$COMPOSE_FILE" up -d $APP_SERVICES
 
   echo ""
@@ -217,11 +244,15 @@ do_start() {
   ensure_compose_compat
   if [[ -n "$SERVICE" ]]; then
     echo "=== 启动服务: $SERVICE ==="
+    if [[ "$SERVICE" == "backend" || "$SERVICE" == "worker" ]]; then
+      run_migrations
+    fi
     $COMPOSE_CMD -f "$COMPOSE_FILE" up -d "$SERVICE"
   else
     echo "=== 启动全部服务 ==="
     $COMPOSE_CMD -f "$COMPOSE_FILE" up -d $INFRA_SERVICES
     wait_infra_healthy
+    run_migrations
     $COMPOSE_CMD -f "$COMPOSE_FILE" up -d $APP_SERVICES
   fi
   echo "=== 启动完成 ==="
@@ -244,10 +275,32 @@ do_restart() {
   local SERVICE="${2:-}"
   if [[ -n "$SERVICE" ]]; then
     echo "=== 重启服务: $SERVICE(不重建容器、不加载镜像)==="
-    $COMPOSE_CMD -f "$COMPOSE_FILE" restart "$SERVICE"
+    case "$SERVICE" in
+      backend)
+        $COMPOSE_CMD -f "$COMPOSE_FILE" stop worker backend || true
+        run_migrations
+        $COMPOSE_CMD -f "$COMPOSE_FILE" up -d backend
+        $COMPOSE_CMD -f "$COMPOSE_FILE" up -d worker
+        ;;
+      worker)
+        $COMPOSE_CMD -f "$COMPOSE_FILE" stop worker || true
+        run_migrations
+        $COMPOSE_CMD -f "$COMPOSE_FILE" up -d worker
+        ;;
+      frontend)
+        $COMPOSE_CMD -f "$COMPOSE_FILE" restart frontend
+        ;;
+      *)
+        $COMPOSE_CMD -f "$COMPOSE_FILE" restart "$SERVICE"
+        ;;
+    esac
   else
     echo "=== 重启应用(不重建容器、不加载镜像)==="
-    $COMPOSE_CMD -f "$COMPOSE_FILE" restart $APP_SERVICES
+    # 先停 Worker/Backend，迁移完成后再恢复，避免文档长事务或 API 查询阻塞 DDL。
+    $COMPOSE_CMD -f "$COMPOSE_FILE" stop worker backend || true
+    run_migrations
+    $COMPOSE_CMD -f "$COMPOSE_FILE" up -d backend frontend
+    $COMPOSE_CMD -f "$COMPOSE_FILE" up -d worker
   fi
   echo ""
   echo "=== 重启完成 ==="
@@ -260,29 +313,34 @@ do_update() {
 
   # 记录加载前的应用镜像 ID（仅用于打印变化提示，不作为终止依据）
   local before_backend before_frontend
-  before_backend=$(docker images -q artoo-backend:latest 2>/dev/null)
-  before_frontend=$(docker images -q artoo-frontend:latest 2>/dev/null)
+  before_backend=$(docker images -q "$BACKEND_IMAGE" 2>/dev/null)
+  before_frontend=$(docker images -q "$FRONTEND_IMAGE" 2>/dev/null)
+  local rollback_suffix="rollback-pre-update-$(date '+%Y%m%d-%H%M%S')"
+  if [[ -n "$before_backend" ]]; then
+    docker tag "$before_backend" "${BACKEND_IMAGE%:*}:$rollback_suffix"
+    echo "  已保留 backend 回滚镜像: ${BACKEND_IMAGE%:*}:$rollback_suffix"
+  fi
+  if [[ -n "$before_frontend" ]]; then
+    docker tag "$before_frontend" "${FRONTEND_IMAGE%:*}:$rollback_suffix"
+    echo "  已保留 frontend 回滚镜像: ${FRONTEND_IMAGE%:*}:$rollback_suffix"
+  fi
 
-  echo "[1/3] 加载镜像..."
-  local found_tar=0
-  for f in *.tar; do
-    [[ -f "$f" ]] || continue
-    found_tar=1
-    local mtime_h
-    mtime_h=$(date -d "@$(stat -c %Y "$f" 2>/dev/null || echo 0)" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || echo "未知")
-    echo "  load ${f}（修改于 ${mtime_h}）"
-    docker load -i "$f"
-  done
-  if [[ "$found_tar" -eq 0 ]]; then
-    echo "  ❌ 当前目录没有 .tar 镜像包，无法更新"
+  echo "[1/3] 加载应用镜像..."
+  local app_tar="${APP_IMAGE_ARCHIVE:-app-images.tar}"
+  if [[ ! -f "$app_tar" ]]; then
+    echo "  ❌ 当前目录没有 ${app_tar}，无法更新"
     exit 1
   fi
+  local mtime_h
+  mtime_h=$(date -d "@$(stat -c %Y "$app_tar" 2>/dev/null || echo 0)" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || echo "未知")
+  echo "  load ${app_tar}（修改于 ${mtime_h}）"
+  docker load -i "$app_tar"
 
   # 镜像 ID 变化仅作信息提示：手动 docker load 过镜像等场景下 ID 可能不变，
   # 但 update 仍应照常重建容器，不再因“镜像未变化”终止。
   local after_backend after_frontend
-  after_backend=$(docker images -q artoo-backend:latest 2>/dev/null)
-  after_frontend=$(docker images -q artoo-frontend:latest 2>/dev/null)
+  after_backend=$(docker images -q "$BACKEND_IMAGE" 2>/dev/null)
+  after_frontend=$(docker images -q "$FRONTEND_IMAGE" 2>/dev/null)
   if [[ "$before_backend" == "$after_backend" && "$before_frontend" == "$after_frontend" ]]; then
     echo "  ℹ️ 镜像 ID 未变化（可能已手动 load 过），仍将继续重建容器。"
   else
@@ -294,28 +352,43 @@ do_update() {
   echo "[2/3] 处理 compose 文件兼容性..."
   ensure_compose_compat
 
+  # 仅 backend/worker 更新需要迁移。重建前先停 Worker；迁移成功后才允许其恢复，
+  # 避免长期文档事务与 backend 启动 DDL 形成锁队列。
+  if [[ -z "$SERVICE" || "$SERVICE" == "backend" || "$SERVICE" == "worker" ]]; then
+    if [[ -z "$SERVICE" || "$SERVICE" == "backend" ]]; then
+      $COMPOSE_CMD -f "$COMPOSE_FILE" stop worker backend || true
+    else
+      $COMPOSE_CMD -f "$COMPOSE_FILE" stop worker || true
+    fi
+    run_migrations
+  fi
+
   if [[ -n "$SERVICE" ]]; then
     echo "[3/3] 重建容器: $SERVICE..."
-    $COMPOSE_CMD -f "$COMPOSE_FILE" up -d --force-recreate "$SERVICE"
+    if [[ "$SERVICE" == "backend" ]]; then
+      $COMPOSE_CMD -f "$COMPOSE_FILE" up -d --force-recreate backend
+      $COMPOSE_CMD -f "$COMPOSE_FILE" up -d worker
+    else
+      $COMPOSE_CMD -f "$COMPOSE_FILE" up -d --force-recreate "$SERVICE"
+    fi
   else
     echo "[3/3] 重建应用容器..."
     $COMPOSE_CMD -f "$COMPOSE_FILE" up -d --force-recreate $APP_SERVICES
   fi
 
-  # 清理被新镜像顶替下来的旧 artoo 悬空镜像（docker load 只加载不删旧镜像，
-  # 同名 latest tag 会移到新镜像上，旧镜像变成 <none> 越积越多，占用磁盘）。
-  # 仅删除本次加载前记录的旧 backend/frontend，且确认已被新镜像替换，
-  # 不做全局 prune，避免误删同主机其它项目的镜像。
-  local removed=0
+  # 默认保留旧镜像，确保 rollback tag 和上一版可立即恢复。只有显式设置
+  # CLEAN_OLD_IMAGES=1 时才删除本次被顶替的旧镜像。
   for old in "$before_backend" "$before_frontend"; do
     if [[ -n "$old" && "$old" != "$after_backend" && "$old" != "$after_frontend" ]]; then
-      if docker rmi "$old" >/dev/null 2>&1; then
-        echo "  清理旧镜像 $old"
-        removed=1
+      if [[ "${CLEAN_OLD_IMAGES:-0}" == "1" ]]; then
+        if docker rmi "$old" >/dev/null 2>&1; then
+          echo "  清理旧镜像 $old"
+        fi
+      else
+        echo "  保留旧镜像供回滚: $old（如需清理设置 CLEAN_OLD_IMAGES=1）"
       fi
     fi
   done
-  [[ "$removed" -eq 1 ]] && echo "  ✓ 已清理上一版应用镜像"
 
   echo ""
   echo "=== 更新完成 ==="

@@ -218,44 +218,6 @@ async def load_asr_manager() -> "ASRManager":
     return ASRManager(await load_asr_configs())
 
 
-async def _auto_migrate_session_file_columns() -> None:
-    """自动为 session_files 表补齐异步上传所需的新列（轻量级迁移，幂等）。
-
-    与 main.py::_auto_migrate_columns 同款模式：先查 information_schema.columns
-    判断列是否存在，缺失才 ALTER TABLE ADD COLUMN。老库平滑升级，新库经 init_db
-    的 create_all 已建好，本函数全部跳过。
-
-    API 进程与 Worker 进程启动时各调用一次（幂等，重复调用安全）。
-    """
-    from sqlalchemy import text
-
-    migrations = [
-        # session_files.progress (Integer, default 0) - 0-100 建索引进度
-        ("session_files", "progress", "ALTER TABLE session_files ADD COLUMN progress INTEGER DEFAULT 0"),
-        # session_files.progress_message (String, nullable) - 当前阶段人类可读描述
-        ("session_files", "progress_message", "ALTER TABLE session_files ADD COLUMN progress_message VARCHAR"),
-        # session_files.error_message (Text, nullable) - 失败原因
-        ("session_files", "error_message", "ALTER TABLE session_files ADD COLUMN error_message TEXT"),
-    ]
-
-    async with async_session() as session:
-        for table, column, sql in migrations:
-            try:
-                # 检查列是否已存在
-                check_sql = text(
-                    "SELECT column_name FROM information_schema.columns "
-                    "WHERE table_name = :table AND column_name = :column"
-                )
-                result = await session.execute(check_sql, {"table": table, "column": column})
-                if result.scalar() is None:
-                    await session.execute(text(sql))
-                    await session.commit()
-                    logger.info("自动迁移：添加列 %s.%s", table, column)
-            except Exception as e:
-                logger.debug("迁移检查跳过 %s.%s: %s", table, column, e)
-                await session.rollback()
-
-
 async def start_invalidation_bus(handlers: dict[str, callable]) -> None:
     """初始化并启动 InvalidationBus 后台订阅（subOnce 防重）。
 

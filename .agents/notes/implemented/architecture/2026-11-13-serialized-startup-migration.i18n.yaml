@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record: the Git blob hash of each side as of the
+# last confirmed-consistent state. Both languages carry equal authority; after
+# editing either side, bring the other along and re-record both hashes with:
+#   git hash-object .agents/notes/implemented/architecture/2026-11-13-serialized-startup-migration.md .agents/notes/implemented/architecture/2026-11-13-serialized-startup-migration.zh.md
+2026-11-13-serialized-startup-migration.md: f7a8d44d6367885c34b3e61c91a796f504896cd5
+2026-11-13-serialized-startup-migration.zh.md: ecc61bafa5814cab0605e8f8539867721a2945c6

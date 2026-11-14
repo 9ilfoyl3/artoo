@@ -230,6 +230,26 @@ services:
     restart: unless-stopped
 
   # ============ 应用（profile: app）============
+  migrate:
+    container_name: arag-migrate
+    image: artoo-backend:latest
+    build: ./backend
+    profiles: ["app"]
+    # 一次性迁移任务：所有 backend/worker 必须等它成功退出后再启动，避免多个
+    # uvicorn worker 并行执行 DDL，或启动迁移被 Worker 长事务阻塞。
+    command: ["python", "-m", "app.migrate"]
+    env_file: .env
+    environment:
+      - TZ=${TZ:-Asia/Shanghai}
+      - DATABASE_URL=postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/artoo
+      - AUTO_MIGRATE_ON_STARTUP=false
+    depends_on:
+      postgres:
+        condition: service_healthy
+    logging: *default-logging
+    mem_limit: 1g
+    restart: "no"
+
   backend:
     container_name: arag-backend
     image: artoo-backend:latest
@@ -256,10 +276,13 @@ services:
       # 知识图谱 Neo4j 连接（容器内拓扑固定值）。是否真正连接由 .env 的 GRAPH_ENABLE 控制，
       # 默认 false 即不连；账号口令走 .env 的 NEO4J_USERNAME/NEO4J_PASSWORD。
       - NEO4J_URI=bolt://neo4j:7687
+      - AUTO_MIGRATE_ON_STARTUP=false
     volumes:
       - upload_data:/app/data
       - ./logs:/app/logs
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       milvus:
@@ -297,10 +320,13 @@ services:
       # 知识图谱 Neo4j 连接（容器内拓扑固定值）。GraphExtractWorker 抽取写图用；
       # 是否真正连接由 .env 的 GRAPH_ENABLE 控制，默认 false 即不连。
       - NEO4J_URI=bolt://neo4j:7687
+      - AUTO_MIGRATE_ON_STARTUP=false
     volumes:
       - upload_data:/app/data
       - ./logs:/app/logs
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       milvus:

@@ -1,5 +1,7 @@
 """PostgreSQL 数据库初始化与会话管理"""
 
+import logging
+import re
 from collections.abc import AsyncGenerator
 
 from sqlalchemy import text
@@ -10,6 +12,10 @@ from app.schema.db import Base
 
 _settings = get_settings()
 _database_url = _settings.database_url
+logger = logging.getLogger(__name__)
+
+# PostgreSQL advisory lock 的任意稳定 int64 标识，仅用于串行化 schema migration。
+_MIGRATION_ADVISORY_LOCK_KEY = 0x4152544F4F4D4947  # "ARTOOMIG"
 
 # 仅支持 PostgreSQL。配置不带驱动的 URL 时自动补异步驱动。
 if _database_url.startswith("postgresql://"):
@@ -21,6 +27,8 @@ engine = create_async_engine(
     echo=False,
     pool_size=_settings.db_pool_size,
     max_overflow=_settings.db_max_overflow,
+    pool_timeout=_settings.db_pool_timeout_seconds,
+    pool_recycle=_settings.db_pool_recycle_seconds,
 )
 
 # 异步会话工厂
@@ -44,9 +52,9 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
             raise
 
 
-async def _migrate_db() -> None:
-    """执行增量迁移（为已有表添加新列，兼容已运行的数据库）"""
-    migrations = [
+def _migration_statements() -> list[str]:
+    """Return the ordered, application-managed schema migration statements."""
+    return [
         "ALTER TABLE llm_configs ADD COLUMN stream_enabled BOOLEAN DEFAULT TRUE",
         "ALTER TABLE llm_configs ADD COLUMN max_context_tokens INTEGER",
         "ALTER TABLE llm_configs ADD COLUMN max_output_tokens INTEGER",
@@ -72,7 +80,19 @@ async def _migrate_db() -> None:
         # 清理历史遗留列：旧版本 embed_configs 表带 device NOT NULL 列（本地推理设备），
         # 当前模型已移除该字段（统一走 remote），插入时不再赋值，会触发 NOT NULL 约束错误。
         # 解除其 NOT NULL 约束以兼容旧库（列保留，值留空，无数据丢失）。
-        "ALTER TABLE embed_configs ALTER COLUMN device DROP NOT NULL",
+        """
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = 'embed_configs'
+                  AND column_name = 'device'
+            ) THEN
+                ALTER TABLE embed_configs ALTER COLUMN device DROP NOT NULL;
+            END IF;
+        END $$;
+        """,
         # Embedding 配置表新增 sparse 支持字段
         "ALTER TABLE embed_configs ADD COLUMN sparse_enabled BOOLEAN DEFAULT TRUE",
         # Embedding/Rerank 配置表新增厂商（vendor）列：仅用于 UI 记忆所选服务商
@@ -80,6 +100,8 @@ async def _migrate_db() -> None:
         # 对话消息表新增知识库追踪字段
         "ALTER TABLE chat_messages ADD COLUMN kb_id VARCHAR",
         "ALTER TABLE chat_messages ADD COLUMN kb_ids JSON",
+        # Agent typed response steps used by history replay.
+        "ALTER TABLE chat_messages ADD COLUMN agent_steps JSON",
         # 对话消息表新增附件字段：用户消息发送时绑定的会话文件快照（session-file-upload）
         "ALTER TABLE chat_messages ADD COLUMN attachments JSON",
         # 对话消息表新增反馈字段：用户对 AI 回答的点赞/踩（chat-message-actions，保留供 agent 优化）
@@ -91,7 +113,19 @@ async def _migrate_db() -> None:
         # 清理历史遗留列：旧版本 knowledge_bases 表带 retrieval_mode NOT NULL 列，
         # 当前模型已移除该字段，插入时不再赋值，会触发 NOT NULL 约束错误。
         # 解除其 NOT NULL 约束以兼容旧库（列保留，值留空，无数据丢失）。
-        "ALTER TABLE knowledge_bases ALTER COLUMN retrieval_mode DROP NOT NULL",
+        """
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = 'knowledge_bases'
+                  AND column_name = 'retrieval_mode'
+            ) THEN
+                ALTER TABLE knowledge_bases ALTER COLUMN retrieval_mode DROP NOT NULL;
+            END IF;
+        END $$;
+        """,
         # ===== tenant-rbac-refactor：为旧库补齐租户隔离 / 归属 / 可见性列 =====
         # create_all 只新建缺失的表，不会为已存在的表补列；下列 ALTER 让升级前建立的
         # 旧库（已有业务数据）平滑获得新列。带 NOT NULL 的列给 DEFAULT，已有行自动回填。
@@ -160,6 +194,10 @@ async def _migrate_db() -> None:
         # ===== event-centric-graph：抽取台账新增事件计数列（存量库补列，缺省 0） =====
         # create_all 只建缺失整表、不给存量表补列；新增 events_count 供 worker 双写后累加。
         "ALTER TABLE graph_extract_jobs ADD COLUMN events_count INTEGER NOT NULL DEFAULT 0",
+        # ===== session-file-upload：会话文件异步处理进度 =====
+        "ALTER TABLE session_files ADD COLUMN progress INTEGER DEFAULT 0",
+        "ALTER TABLE session_files ADD COLUMN progress_message VARCHAR",
+        "ALTER TABLE session_files ADD COLUMN error_message TEXT",
         # ===== utc-timezone-fix：时间列统一为 timestamptz（带时区，内部存 UTC）=====
         # 根因：旧列为 TIMESTAMP WITHOUT TIME ZONE（naive），应用层混用 func.now()（容器
         # 本地东八区）/ datetime.utcnow() / datetime.now()，序列化无时区后缀，前端按浏览器
@@ -189,46 +227,104 @@ async def _migrate_db() -> None:
         END $$;
         """,
     ]
-    for sql in migrations:
-        try:
-            async with engine.begin() as conn:
-                await conn.execute(text(sql))
-        except Exception as e:
-            # 列已存在 / 列不存在 等均属正常（幂等迁移），其他错误需要关注
-            msg = str(e)
-            if any(
-                kw in msg
-                for kw in ("already exists", "DuplicateColumn", "does not exist", "UndefinedColumn")
-            ):
-                pass
-            else:
-                import logging
-                logging.getLogger(__name__).warning("Migration 跳过: %s | 原因: %s", sql.strip()[:60], e)
+
+
+def _idempotent_migration_sql(sql: str) -> str:
+    """Make ADD COLUMN migrations replay-safe without emitting duplicate-column errors."""
+    if re.search(r"\bADD\s+COLUMN\b", sql, flags=re.IGNORECASE) and not re.search(
+        r"\bADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\b", sql, flags=re.IGNORECASE
+    ):
+        return re.sub(
+            r"\bADD\s+COLUMN\b",
+            "ADD COLUMN IF NOT EXISTS",
+            sql,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+    return sql
+
+
+def _timeout_literal(seconds: float) -> str:
+    milliseconds = max(1, int(float(seconds) * 1000))
+    return f"{milliseconds}ms"
+
+
+async def apply_migrations() -> None:
+    """Apply schema changes once under a PostgreSQL advisory lock.
+
+    This entrypoint is run by the dedicated ``app.migrate`` job. A short lock timeout
+    prevents a startup from waiting indefinitely behind long ingestion transactions.
+    """
+    lock_timeout = _timeout_literal(_settings.migration_lock_timeout_seconds)
+    statement_timeout = _timeout_literal(
+        _settings.migration_statement_timeout_seconds
+    )
+
+    async with engine.begin() as conn:
+        await conn.execute(text(f"SET LOCAL lock_timeout = '{lock_timeout}'"))
+        await conn.execute(
+            text(f"SET LOCAL statement_timeout = '{statement_timeout}'")
+        )
+        await conn.execute(
+            text("SELECT pg_advisory_xact_lock(CAST(:lock_key AS bigint))"),
+            {"lock_key": _MIGRATION_ADVISORY_LOCK_KEY},
+        )
+        await conn.run_sync(Base.metadata.create_all)
+
+        for raw_sql in _migration_statements():
+            sql = _idempotent_migration_sql(raw_sql)
+            try:
+                async with conn.begin_nested():
+                    await conn.execute(text(sql))
+            except Exception as exc:  # noqa: BLE001 - idempotent compatibility migration
+                message = str(exc)
+                if any(
+                    keyword in message
+                    for keyword in (
+                        "does not exist",
+                        "UndefinedColumn",
+                        "UndefinedTable",
+                    )
+                ):
+                    logger.debug("Migration skipped: %s | %s", sql[:80], exc)
+                else:
+                    logger.error("Migration failed: %s | %s", sql[:80], exc)
+                    raise
+
+    # Bootstrap is idempotent and intentionally runs after schema creation.
+    from app.auth.bootstrap import run_bootstrap
+
+    await run_bootstrap(async_session)
+
+
+async def verify_database_ready() -> None:
+    """Fail startup early when PostgreSQL is unreachable, without running DDL."""
+    async with engine.connect() as conn:
+        await conn.execute(text("SELECT 1"))
 
 
 async def init_db() -> None:
-    """初始化数据库，创建所有表并执行迁移与引导（API 与 Worker 共用入口）。"""
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    await _migrate_db()
-    # tenant-auth 全新初始化引导（幂等）：内置 External_User_Tenant/管理员/公共库、
-    # 预置权限点与 admin/user 角色、Super_Admin。API 进程与 Worker 进程都会经此，
-    # 引导内部幂等并容忍并发首启。不做历史数据迁移/回填。
-    from app.auth.bootstrap import run_bootstrap
-    await run_bootstrap(async_session)
-    # 重置被中断的任务（上次服务重启时正在处理的文档）
-    await _reset_interrupted_tasks()
+    """Prepare database access for API/Worker startup.
+
+    Development/manual startup keeps auto-migration enabled. Production Compose sets
+    ``AUTO_MIGRATE_ON_STARTUP=false`` and runs ``python -m app.migrate`` once before
+    backend/worker, so multiple uvicorn workers never execute DDL concurrently.
+    """
+    if _settings.auto_migrate_on_startup:
+        await apply_migrations()
+    else:
+        await verify_database_ready()
 
 
-async def _reset_interrupted_tasks() -> None:
+async def reset_interrupted_tasks() -> None:
     """重置被中断的任务：将 processing 状态的文档改为 failed
 
     服务重启时，processing 状态意味着上次处理被中断，不可能自动恢复。
     """
-    import logging
-    _logger = logging.getLogger(__name__)
     try:
         async with engine.begin() as conn:
+            lock_timeout = _timeout_literal(_settings.migration_lock_timeout_seconds)
+            await conn.execute(text(f"SET LOCAL lock_timeout = '{lock_timeout}'"))
             result = await conn.execute(
                 text(
                     "UPDATE documents SET status='failed', error_message='服务重启，处理中断' "
@@ -236,7 +332,7 @@ async def _reset_interrupted_tasks() -> None:
                 )
             )
             if result.rowcount > 0:
-                _logger.info("重置 %d 个中断的文档为 failed 状态", result.rowcount)
+                logger.info("重置 %d 个中断的文档为 failed 状态", result.rowcount)
                 print(f"[Init] 重置 {result.rowcount} 个中断的文档为 failed 状态")
-    except Exception as e:
-        _logger.warning("重置中断任务失败: %s", e)
+    except Exception as exc:  # noqa: BLE001 - stale worker state is best-effort
+        logger.warning("重置中断任务失败（不阻断 Worker 启动）: %s", exc)
